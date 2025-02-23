@@ -1,0 +1,9 @@
+[server]
+host = "127.0.0.1"
+port = 8535
+
+[el]
+rpc_url = "http://127.0.0.1:8545"
+
+[wallet]
+command_template = "sh -c 'echo {} >> /tmp/tx_log'"
