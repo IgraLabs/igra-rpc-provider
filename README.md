@@ -53,7 +53,7 @@ cargo build --release
 ```sh
 cargo run
 ```
-By default, the server listens on **`127.0.0.1:8545`**.
+By default, the server listens on **`127.0.0.1:8535`**.
 
 ---
 
@@ -148,8 +148,71 @@ EL_RPC_URL="http://igra-el-client:8545" cargo run
 
 ---
 
+## 🐳 Building and Running with Docker
+
+You can build and run the **IGRA RPC Provider** using Docker. This method allows you to avoid installing Rust or any dependencies manually on your system.
+
+### **1️⃣ Build the Docker Image**
+
+To build the Docker image, use the following command in the root directory of the project (where the `Dockerfile` is located):
+
+```sh
+docker build -t igra-rpc-provider .
+```
+
+This will create a Docker image named `igra-rpc-provider`.
+
+---
+
+### **2️⃣ Run the Application in a Docker Container**
+
+Once the image is built, you can start the application by running a container using the command:
+
+```sh
+docker run --name igra-rpc -d -p 8535:8535 igra-rpc-provider
+```
+
+This will bind the container's port `8535` (the default port for the server) to your local machine's port `8535`. You can now interact with the JSON-RPC server at `http://127.0.0.1:8535`.
+
+---
+
+### 🛠 **Environment Configuration**
+
+If your application relies on specific environment variables or external configuration files, you can pass them to the container using the `-e` or `-v` flags, or with the `--env-file` option.
+ For example:
+
+```sh
+docker run -p 8535:8535 --env-file /path/to/custom.env igra-rpc-provider
+```
+
+Ensure that all required dependencies, such as the IGRA EL Client and the KASPA Wallet, are properly configured and accessible to the containerized application.
+
+---
+
+### **3️⃣ Verify the Service**
+
+Once the container is running, you can verify it using a `curl` command for one of the supported JSON-RPC methods like `eth_blockNumber`:
+
+```sh
+curl -X POST http://127.0.0.1:8535 \
+-H "Content-Type: application/json" \
+-d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+```
+
+You should receive a JSON response containing the block number.
+```json
+{
+  "jsonrpc": "2.0",
+  "result": "0xa5b9",
+  "id": 1
+}
+```
+
+---
+
 ## 🛠 Known Issues and Future Improvements
 - BUG: Config ignores the environment variables.
+- `wss:\\` protocol shall be supported for JSON-RPC requests. 
 - Interface with KASPA Wallet needs to be improved.
 
 ---
