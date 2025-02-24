@@ -11,8 +11,11 @@ COPY ./ ./
 RUN apt-get update && apt-get install -y \
     libssl-dev pkg-config && apt-get clean
 
-# Build the application in release mode, linking it to OpenSSL 3
-RUN cargo build --release
+# Build igra-rpc-provider in release mode
+RUN cargo build --release --bin igra-rpc-provider
+
+# Build kaspa_wallet_simulator in release mode
+RUN cargo build --release --bin kaspa_wallet_simulator
 
 # Stage 2: Create the final runtime container
 FROM debian:bookworm-slim
@@ -25,8 +28,11 @@ RUN apt-get update && apt-get install -y \
 # Set the working directory
 WORKDIR /app
 
-# Copy the built binary and the config from the previous stage
+# Copy the built binaries from the previous stage
 COPY --from=builder /app/target/release/igra-rpc-provider .
+COPY --from=builder /app/target/release/kaspa_wallet_simulator .
+
+# Copy the config file from the previous stage
 COPY --from=builder /app/config.toml .
 
 # Set the entrypoint to the built binary
