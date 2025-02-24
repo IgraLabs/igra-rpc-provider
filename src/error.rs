@@ -1,5 +1,5 @@
-use thiserror::Error;
 use serde_json::{json, Value};
+use thiserror::Error;
 
 /// Custom application error type for handling various types of errors.
 #[derive(Debug, Error)]

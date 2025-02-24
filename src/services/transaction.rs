@@ -23,7 +23,7 @@ pub async fn handle_send_raw_transaction(req: RpcRequest, config: &AppConfig) ->
     let hex_str = if raw_tx.len() % 2 != 0 {
         format!("0{}", &raw_tx[2..])
     } else {
-        format!("{}", &raw_tx[2..])
+        raw_tx[2..].to_string()
     };
 
     let tx_bytes = match hex::decode(hex_str) {

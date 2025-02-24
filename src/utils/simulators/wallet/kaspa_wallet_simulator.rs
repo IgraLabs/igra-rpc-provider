@@ -27,7 +27,10 @@ async fn main() {
 
     // Parse CLI arguments
     let args = Args::parse();
-    info!("Parsed CLI arguments: rpc_url={}, raw_tx=<hidden>", args.rpc_url);
+    info!(
+        "Parsed CLI arguments: rpc_url={}, raw_tx=<hidden>",
+        args.rpc_url
+    );
 
     // Ensure the raw transaction starts with "0x"
     if !args.raw_tx.starts_with("0x") {
@@ -79,14 +82,11 @@ async fn send_raw_transaction(rpc_url: &str, raw_tx: &str) -> Result<String, Str
         })?;
 
     let status = response.status();
-    let response_text = response
-        .text()
-        .await
-        .map_err(|e| {
-            let error_message = format!("Failed to read response: {}", e);
-            info!("{}", error_message);
-            error_message
-        })?;
+    let response_text = response.text().await.map_err(|e| {
+        let error_message = format!("Failed to read response: {}", e);
+        info!("{}", error_message);
+        error_message
+    })?;
 
     // Log the raw HTTP response and status
     debug!("HTTP Status: {}", status);
@@ -104,19 +104,18 @@ async fn send_raw_transaction(rpc_url: &str, raw_tx: &str) -> Result<String, Str
     }
 
     info!("Parsing JSON-RPC response...");
-    let json_response: serde_json::Value =
-        serde_json::from_str(&response_text).map_err(|e| {
-            let error_message = format!("Failed to parse response JSON: {}", e);
-            info!("{}", error_message);
-            error_message
-        })?;
+    let json_response: serde_json::Value = serde_json::from_str(&response_text).map_err(|e| {
+        let error_message = format!("Failed to parse response JSON: {}", e);
+        info!("{}", error_message);
+        error_message
+    })?;
 
     // Extract the result or error
     if let Some(result) = json_response.get("result") {
         debug!("Parsed result from response: {}", result);
         Ok(result.to_string())
     } else if let Some(error) = json_response.get("error") {
-        let error_message = format!("RPC error: {}", error.to_string());
+        let error_message = format!("RPC error: {}", error);
         info!("{}", error_message);
         Err(error_message)
     } else {

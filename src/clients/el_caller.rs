@@ -1,7 +1,7 @@
+use crate::error::AppError;
+use once_cell::sync::Lazy;
 use reqwest::Client;
 use serde_json::Value;
-use once_cell::sync::Lazy;
-use crate::error::AppError;
 
 // A shared, pre-configured HTTP client for sending requests.
 static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {

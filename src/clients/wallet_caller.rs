@@ -1,5 +1,5 @@
-use tokio::process::Command;
 use shlex;
+use tokio::process::Command;
 
 use crate::config::WalletConfig;
 
@@ -17,10 +17,7 @@ use crate::config::WalletConfig;
 ///
 /// # Errors:
 /// Returns an error with a string description if command execution fails or if the shell command returns a non-zero exit code.
-pub async fn send_transaction(
-    raw_tx: &str,
-    wallet_config: &WalletConfig,
-) -> Result<(), String> {
+pub async fn send_transaction(raw_tx: &str, wallet_config: &WalletConfig) -> Result<(), String> {
     // Replace placeholders in the command template ({} -> raw_tx).
     let command_str = wallet_config.command_template.replace("{}", raw_tx);
 

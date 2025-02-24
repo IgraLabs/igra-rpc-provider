@@ -1,14 +1,14 @@
 mod api;
 mod clients;
+mod config;
+mod error;
 mod services;
 mod types;
-mod error;
-mod config;
 
-use axum::{Router, routing::post};
+use axum::{routing::post, Router};
+use config::AppConfig;
 use std::net::SocketAddr;
 use tracing::{debug, info};
-use config::AppConfig;
 
 #[tokio::main]
 async fn main() {

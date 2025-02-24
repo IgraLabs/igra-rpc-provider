@@ -1,8 +1,8 @@
+use crate::clients::el_caller::send_rpc_request;
+use crate::types::rpc::RpcRequest;
 use axum::Json;
 use serde_json::{json, to_value, Value};
 use tracing::debug;
-use crate::clients::el_caller::send_rpc_request;
-use crate::types::rpc::RpcRequest;
 
 /// Forwards JSON-RPC requests to the IGRA EL Client.
 ///
