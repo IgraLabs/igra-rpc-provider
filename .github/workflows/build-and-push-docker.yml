@@ -27,8 +27,8 @@ jobs:
 
       # Build the Docker image
       - name: Build Docker image
-        run: docker build -t ghcr.io/${{ github.repository_owner }}/${{ github.repository }}:latest .
+        run: docker build -t ghcr.io/igralabs/igra-rpc-provider:latest .
 
       # Push the Docker image to GitHub Packages
       - name: Push Docker image
-        run: docker push ghcr.io/${{ github.repository_owner }}/${{ github.repository }}:latest
+        run: docker push ghcr.io/igralabs/igra-rpc-provider:latest
