@@ -134,16 +134,16 @@ cargo test
 ## ⚙️ Configuration
 The following environment variables can be used:  
 
-| Variable                  | Description                          | Default                          |
-|---------------------------|--------------------------------------|----------------------------------|
-| `SERVER_HOST`             | Address this app listen requests at  | `127.0.0.1`                      |
-| `SERVER_PORT`             | Port this app listen requests at     | `8535`                           |
-| `EL_RPC_URL`              | URL of the IGRA EL Client            | `http://127.0.0.1:8545`          |
-| `WALLET_COMMAND_TEMPLATE` | Shell command to call KASPA Wallet   | `sh -c 'echo {} >> /tmp/tx_log'` |
+| Variable         | Description                          | Default                          |
+|------------------|--------------------------------------|----------------------------------|
+| `SERVER_HOST`    | Address this app listen requests at  | `127.0.0.1`                      |
+| `SERVER_PORT`    | Port this app listen requests at     | `8535`                           |
+| `EL_URL`         | URL of the IGRA EL Client            | `http://127.0.0.1:8545`          |
+| `WALLET_COMMAND` | Shell command to call KASPA Wallet   | `sh -c 'echo {} >> /tmp/tx_log'` |
 
 Example: Run with a custom node URL.
 ```sh
-EL_RPC_URL="http://igra-el-client:8545" cargo run
+EL_URL="http://igra-el-client:8545" cargo run
 ```
 
 ---
@@ -211,7 +211,6 @@ You should receive a JSON response containing the block number.
 ---
 
 ## 🛠 Known Issues and Future Improvements
-- BUG: Config ignores the environment variables.
 - `wss:\\` protocol shall be supported for JSON-RPC requests. 
 - Interface with KASPA Wallet needs to be improved.
 

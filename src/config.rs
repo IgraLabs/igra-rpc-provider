@@ -16,19 +16,21 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ElConfig {
-    pub rpc_url: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct WalletConfig {
-    pub command_template: String,
+    pub command: String,
 }
 
 impl AppConfig {
     pub fn load() -> Self {
         let settings = Config::builder()
             .add_source(File::with_name("config"))
-            .add_source(Environment::with_prefix("rpc"))
+            .add_source(
+                Environment::default().separator("_"), // for nested keys
+            )
             .build()
             .unwrap();
 

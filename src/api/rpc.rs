@@ -15,6 +15,6 @@ pub async fn handle_rpc(
 ) -> impl IntoResponse {
     match req.method.as_str() {
         "eth_sendRawTransaction" => transaction::handle_send_raw_transaction(req, &config).await,
-        _ => proxy::forward_to_el(req, &config.el.rpc_url).await,
+        _ => proxy::forward_to_el(req, &config.el.url).await,
     }
 }

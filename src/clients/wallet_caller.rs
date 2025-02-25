@@ -19,7 +19,7 @@ use crate::config::WalletConfig;
 /// Returns an error with a string description if command execution fails or if the shell command returns a non-zero exit code.
 pub async fn send_transaction(raw_tx: &str, wallet_config: &WalletConfig) -> Result<(), String> {
     // Replace placeholders in the command template ({} -> raw_tx).
-    let command_str = wallet_config.command_template.replace("{}", raw_tx);
+    let command_str = wallet_config.command.replace("{}", raw_tx);
 
     // Parse the command string into the base command and arguments using shlex.
     let args = shlex::split(&command_str)
