@@ -3,7 +3,7 @@ host = "0.0.0.0"
 port = 8535
 
 [el]
-rpc_url = "http://igra-dev-el:8545"
+url = "http://igra-dev-el:8545"
 
 [wallet]
-command_template = "./kaspa_wallet_simulator --raw-tx \"{}\" --rpc-url \"http://igra-dev-el:8545\""
+command = "./kaspa_wallet_simulator --raw-tx \"{}\" --rpc-url \"http://igra-dev-el:8545\""
