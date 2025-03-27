@@ -6,7 +6,11 @@ use axum::Json;
 use bytes::BytesMut;
 use ethers::types::{Transaction, H256};
 use ethers::utils::{keccak256, rlp};
+use flate2::write::ZlibEncoder;
+use flate2::Compression;
 use serde_json::{json, Value};
+use std::error::Error;
+use std::io::Write;
 use tracing::{debug, error, info, warn};
 
 /// Handles `eth_sendRawTransaction` requests.
@@ -45,16 +49,21 @@ pub async fn handle_send_raw_transaction(req: RpcRequest, config: &AppConfig) ->
 
     debug!(?tx, "Decoded transaction");
 
-    let payload = prepare_payload(&tx_bytes);
-
-    // 2. Call the KASPA Wallet for sending the transaction to the Base Layer
-    info!("Calling the KASPA Wallet to submit a transaction");
-    let wallet_caller = WalletCaller::new(config.wallet.clone()).await;
-    if let Err(err) = wallet_caller {
+    let payload_result = prepare_payload(&tx_bytes);
+    if let Err(err) = payload_result {
         error!("Failed to create WalletCaller: {}", err);
         return Json(AppError::WalletCallError.to_json_rpc_error(req.id));
     }
-    let wallet_caller = wallet_caller.unwrap();
+    let payload = payload_result.unwrap();
+
+    // 2. Call the KASPA Wallet for sending the transaction to the Base Layer
+    info!("Calling the KASPA Wallet to submit a transaction");
+    let wallet_caller_result = WalletCaller::new(config.wallet.clone()).await;
+    if let Err(err) = wallet_caller_result {
+        error!("Failed to create WalletCaller: {}", err);
+        return Json(AppError::WalletCallError.to_json_rpc_error(req.id));
+    }
+    let wallet_caller = wallet_caller_result.unwrap();
 
     if let Err(err) = wallet_caller.send_transaction(payload).await {
         error!("KASPA Wallet call failed: {}", err);
@@ -73,12 +82,16 @@ pub async fn handle_send_raw_transaction(req: RpcRequest, config: &AppConfig) ->
     }))
 }
 
-fn prepare_payload(tx_bytes: &[u8]) -> Vec<u8> {
+fn prepare_payload(tx_bytes: &[u8]) -> Result<Vec<u8>, Box<dyn Error + Sync + Send>> {
     let mut payload_buffer = BytesMut::with_capacity(3 + tx_bytes.len());
 
     payload_buffer.extend_from_slice(&[0x97, 0xB1]);
     payload_buffer.extend_from_slice(&[0xA2]);
     payload_buffer.extend_from_slice(&tx_bytes);
 
-    payload_buffer.to_vec()
+    let mut zlib_encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    zlib_encoder.write_all(payload_buffer.to_vec().as_slice())?;
+    let zipped_payload = zlib_encoder.finish()?;
+
+    Ok(zipped_payload)
 }
