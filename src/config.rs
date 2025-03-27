@@ -22,7 +22,6 @@ pub struct ElConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct WalletConfig {
     pub wallet_daemon_uri: String,
-    pub password: String,
     pub to_address: String,
 }
 
