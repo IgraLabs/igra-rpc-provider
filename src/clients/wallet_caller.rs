@@ -1,46 +1,70 @@
-use shlex;
-use tokio::process::Command;
-
 use crate::config::WalletConfig;
+use kaswallet_proto::kaswallet_proto::wallet_client::WalletClient;
+use kaswallet_proto::kaswallet_proto::{NewAddressRequest, SendRequest, TransactionDescription};
+use std::error::Error;
+use tokio::sync::Mutex;
+use tonic::transport::Channel;
+use tracing::info;
 
-/// Calls the KASPA Wallet to send to KASPA DAG a transaction with the L2 payload.
-/// Currently, the IGRA version of the KASPA Wallet supports only a CLI interface.
-/// This function triggers a configurable shell command to interact with the Wallet.
-///
-/// # Parameters:
-/// - `raw_tx`: A string slice representing the raw transaction to be processed.
-/// - `wallet_config`: Reference to the wallet configuration, containing the shell command template.
-///
-/// # Returns:
-/// - `Ok(())` if the command executes successfully.
-/// - `Err(String)` if the command fails.
-///
-/// # Errors:
-/// Returns an error with a string description if command execution fails or if the shell command returns a non-zero exit code.
-pub async fn send_transaction(raw_tx: &str, wallet_config: &WalletConfig) -> Result<(), String> {
-    // Replace placeholders in the command template ({} -> raw_tx).
-    let command_str = wallet_config.command.replace("{}", raw_tx);
+pub struct WalletCaller {
+    wallet_config: WalletConfig,
+    wallet_daemon_client: Mutex<WalletClient<Channel>>,
+    to_address: String,
+}
 
-    // Parse the command string into the base command and arguments using shlex.
-    let args = shlex::split(&command_str)
-        .ok_or_else(|| "Failed to parse shell command string".to_string())?;
-
-    // Ensure the parsed command is not empty.
-    if args.is_empty() {
-        return Err("Parsed shell command is empty".to_string());
+impl WalletCaller {
+    pub async fn new(wallet_config: WalletConfig) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        let mut wallet_daemon_client =
+            WalletClient::connect(wallet_config.wallet_daemon_uri.clone()).await?;
+        let to_address_response = wallet_daemon_client
+            .new_address(NewAddressRequest {})
+            .await?;
+        Ok(Self {
+            wallet_config,
+            wallet_daemon_client: Mutex::new(wallet_daemon_client),
+            to_address: to_address_response.into_inner().address,
+        })
     }
 
-    // Execute the command using tokio's asynchronous process manager.
-    let output = Command::new(&args[0])
-        .args(&args[1..])
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
+    /// Calls the KASPA Wallet to send to KASPA network a transaction with the L2 payload.
+    ///
+    /// # Parameters:
+    /// - `raw_tx`: A string slice representing the hex-encoded raw transaction to be processed.
+    ///
+    /// # Returns:
+    /// - `Ok(())` if the command executes successfully.
+    /// - `Err(String)` if the command fails.
+    ///
+    /// # Errors:
+    /// Returns an error with a string description if there was a problem sending the transaction
+    pub async fn send_transaction(
+        &self,
+        transaction_bytes: &Vec<u8>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let transaction_description = Some(TransactionDescription {
+            to_address: self.to_address.clone(),
+            amount: 0,
+            is_send_all: true,
+            payload: transaction_bytes.clone(),
+            from_addresses: vec![],
+            utxos: vec![],
+            use_existing_change_address: false,
+            fee_policy: None,
+        });
 
-    // Check the execution result.
-    if output.status.success() {
+        let mut wallet_daemon_client = self.wallet_daemon_client.lock().await;
+        let response = wallet_daemon_client
+            .send(SendRequest {
+                transaction_description,
+                password: self.wallet_config.password.clone(),
+            })
+            .await?;
+
+        info!(
+            "Transaction(s) sent successfully: {:?}",
+            response.into_inner().transaction_ids
+        );
+
         Ok(())
-    } else {
-        Err("Shell command failed".to_string())
     }
 }

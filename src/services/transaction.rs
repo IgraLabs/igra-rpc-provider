@@ -1,4 +1,4 @@
-use crate::clients::wallet_caller::send_transaction;
+use crate::clients::wallet_caller::WalletCaller;
 use crate::config::AppConfig;
 use crate::error::AppError;
 use crate::types::rpc::RpcRequest;
@@ -46,7 +46,8 @@ pub async fn handle_send_raw_transaction(req: RpcRequest, config: &AppConfig) ->
 
     // 2. Call the KASPA Wallet for sending the transaction to the Base Layer
     info!("Calling the KASPA Wallet to submit a transaction");
-    if let Err(err) = send_transaction(raw_tx, &config.wallet).await {
+    let wallet_caller = WalletCaller::new(config.wallet.clone()).await.unwrap();
+    if let Err(err) = wallet_caller.send_transaction(&tx_bytes).await {
         error!("KASPA Wallet call failed: {}", err);
         return Json(AppError::WalletCallError.to_json_rpc_error(req.id));
     }
