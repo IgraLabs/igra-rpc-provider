@@ -3,6 +3,7 @@ use crate::config::AppConfig;
 use crate::error::AppError;
 use crate::types::rpc::RpcRequest;
 use axum::Json;
+use bytes::BytesMut;
 use ethers::types::{Transaction, H256};
 use ethers::utils::{keccak256, rlp};
 use serde_json::{json, Value};
@@ -44,10 +45,12 @@ pub async fn handle_send_raw_transaction(req: RpcRequest, config: &AppConfig) ->
 
     debug!(?tx, "Decoded transaction");
 
+    let payload = prepare_payload(&tx_bytes);
+
     // 2. Call the KASPA Wallet for sending the transaction to the Base Layer
     info!("Calling the KASPA Wallet to submit a transaction");
     let wallet_caller = WalletCaller::new(config.wallet.clone()).await.unwrap();
-    if let Err(err) = wallet_caller.send_transaction(&tx_bytes).await {
+    if let Err(err) = wallet_caller.send_transaction(payload).await {
         error!("KASPA Wallet call failed: {}", err);
         return Json(AppError::WalletCallError.to_json_rpc_error(req.id));
     }
@@ -62,4 +65,14 @@ pub async fn handle_send_raw_transaction(req: RpcRequest, config: &AppConfig) ->
         "result": format!("{:#x}", tx_hash),
         "id": req.id
     }))
+}
+
+fn prepare_payload(tx_bytes: &[u8]) -> Vec<u8> {
+    let mut payload_buffer = BytesMut::with_capacity(3 + tx_bytes.len());
+
+    payload_buffer.extend_from_slice(&[0x97, 0xB1]);
+    payload_buffer.extend_from_slice(&[0xA2]);
+    payload_buffer.extend_from_slice(&tx_bytes);
+
+    payload_buffer.to_vec()
 }
