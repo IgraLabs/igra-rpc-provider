@@ -49,7 +49,13 @@ pub async fn handle_send_raw_transaction(req: RpcRequest, config: &AppConfig) ->
 
     // 2. Call the KASPA Wallet for sending the transaction to the Base Layer
     info!("Calling the KASPA Wallet to submit a transaction");
-    let wallet_caller = WalletCaller::new(config.wallet.clone()).await.unwrap();
+    let wallet_caller = WalletCaller::new(config.wallet.clone()).await;
+    if let Err(err) = wallet_caller {
+        error!("Failed to create WalletCaller: {}", err);
+        return Json(AppError::WalletCallError.to_json_rpc_error(req.id));
+    }
+    let wallet_caller = wallet_caller.unwrap();
+
     if let Err(err) = wallet_caller.send_transaction(payload).await {
         error!("KASPA Wallet call failed: {}", err);
         return Json(AppError::WalletCallError.to_json_rpc_error(req.id));
