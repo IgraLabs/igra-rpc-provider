@@ -23,6 +23,7 @@ pub struct ElConfig {
 pub struct WalletConfig {
     pub wallet_daemon_uri: String,
     pub password: String,
+    pub to_address: String,
 }
 
 impl AppConfig {

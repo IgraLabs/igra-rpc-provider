@@ -16,13 +16,20 @@ impl WalletCaller {
     pub async fn new(wallet_config: WalletConfig) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let mut wallet_daemon_client =
             WalletClient::connect(wallet_config.wallet_daemon_uri.clone()).await?;
-        let to_address_response = wallet_daemon_client
-            .new_address(NewAddressRequest {})
-            .await?;
+        let to_address = wallet_config.to_address.clone();
+        let to_address = if to_address == "" {
+            wallet_daemon_client
+                .new_address(NewAddressRequest {})
+                .await?
+                .into_inner()
+                .address
+        } else {
+            to_address
+        };
         Ok(Self {
             wallet_config,
             wallet_daemon_client: Mutex::new(wallet_daemon_client),
-            to_address: to_address_response.into_inner().address,
+            to_address,
         })
     }
 
