@@ -1,15 +1,18 @@
 use crate::config::WalletConfig;
 use kaswallet_proto::kaswallet_proto::wallet_client::WalletClient;
 use kaswallet_proto::kaswallet_proto::{NewAddressRequest, SendRequest, TransactionDescription};
+use std::env;
 use std::error::Error;
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 use tracing::info;
 
+const PASSWORD_ENV_VAR: &str = "KASWALLET_PASSWORD";
+
 pub struct WalletCaller {
-    wallet_config: WalletConfig,
     wallet_daemon_client: Mutex<WalletClient<Channel>>,
     to_address: String,
+    password: String,
 }
 
 impl WalletCaller {
@@ -26,10 +29,11 @@ impl WalletCaller {
         } else {
             to_address
         };
+        let password = env::var(PASSWORD_ENV_VAR)?;
         Ok(Self {
-            wallet_config,
             wallet_daemon_client: Mutex::new(wallet_daemon_client),
             to_address,
+            password,
         })
     }
 
@@ -46,13 +50,13 @@ impl WalletCaller {
     /// Returns an error with a string description if there was a problem sending the transaction
     pub async fn send_transaction(
         &self,
-        transaction_bytes: &Vec<u8>,
+        payload: Vec<u8>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let transaction_description = Some(TransactionDescription {
             to_address: self.to_address.clone(),
             amount: 0,
             is_send_all: true,
-            payload: transaction_bytes.clone(),
+            payload,
             from_addresses: vec![],
             utxos: vec![],
             use_existing_change_address: false,
@@ -63,7 +67,7 @@ impl WalletCaller {
         let response = wallet_daemon_client
             .send(SendRequest {
                 transaction_description,
-                password: self.wallet_config.password.clone(),
+                password: self.password.clone(),
             })
             .await?;
 
