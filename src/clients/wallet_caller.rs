@@ -29,7 +29,12 @@ impl WalletCaller {
         } else {
             to_address
         };
-        let password = env::var(PASSWORD_ENV_VAR)?;
+        let password = env::var(PASSWORD_ENV_VAR).map_err(|e| {
+            format!(
+                "Failed to get password from environment variable {}: {}",
+                PASSWORD_ENV_VAR, e
+            )
+        })?;
         Ok(Self {
             wallet_daemon_client: Mutex::new(wallet_daemon_client),
             to_address,
