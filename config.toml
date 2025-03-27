@@ -6,4 +6,5 @@ port = 8535
 url = "http://igra-dev-el:8545"
 
 [wallet]
-command = "./kaspa_wallet_simulator --raw-tx \"{}\" --rpc-url \"http://igra-dev-el:8545\""
+wallet_daemon_uri = "http://localhost:8082"
+password = ""

@@ -21,7 +21,8 @@ pub struct ElConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct WalletConfig {
-    pub command: String,
+    pub wallet_daemon_uri: String,
+    pub password: String,
 }
 
 impl AppConfig {
