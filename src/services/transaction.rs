@@ -83,15 +83,15 @@ pub async fn handle_send_raw_transaction(req: RpcRequest, config: &AppConfig) ->
 }
 
 fn prepare_payload(tx_bytes: &[u8]) -> Result<Vec<u8>, Box<dyn Error + Sync + Send>> {
-    let mut payload_buffer = BytesMut::with_capacity(3 + tx_bytes.len());
+    let mut zlib_encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    zlib_encoder.write_all(tx_bytes)?;
+    let zipped_payload = zlib_encoder.finish()?;
+
+    let mut payload_buffer = BytesMut::with_capacity(3 + zipped_payload.len());
 
     payload_buffer.extend_from_slice(&[0x97, 0xB1]);
     payload_buffer.extend_from_slice(&[0xA2]);
     payload_buffer.extend_from_slice(&tx_bytes);
-
-    let mut zlib_encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-    zlib_encoder.write_all(payload_buffer.to_vec().as_slice())?;
-    let zipped_payload = zlib_encoder.finish()?;
 
     Ok(zipped_payload)
 }
