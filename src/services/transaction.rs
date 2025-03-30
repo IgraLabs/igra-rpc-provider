@@ -93,5 +93,5 @@ fn prepare_payload(tx_bytes: &[u8]) -> Result<Vec<u8>, Box<dyn Error + Sync + Se
     payload_buffer.extend_from_slice(&[0xA2]);
     payload_buffer.extend_from_slice(&tx_bytes);
 
-    Ok(zipped_payload)
+    Ok(payload_buffer.to_vec())
 }
