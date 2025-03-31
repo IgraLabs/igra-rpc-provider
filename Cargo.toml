@@ -21,7 +21,7 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tonic = "0.12.3"
-kaswallet-proto = { path = "../kaswallet/kaswallet_proto" }
+kaswallet-proto = { git="https://github.com/IgraLabs/kaswallet-proto.git" }
 bytes = "1.10.1"
 flate2 = "1.1.0"
 
