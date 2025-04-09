@@ -34,7 +34,6 @@ pub static ALLOWED_METHODS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     methods.insert("eth_getUncleByBlockNumberAndIndex");
     methods.insert("eth_getUncleCountByBlockHash");
     methods.insert("eth_getUncleCountByBlockNumber");
-    methods.insert("eth_getWork");
     methods.insert("eth_hashrate");
     methods.insert("eth_mining");
     methods.insert("eth_newBlockFilter");
@@ -42,8 +41,6 @@ pub static ALLOWED_METHODS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     methods.insert("eth_newPendingTransactionFilter");
     methods.insert("eth_protocolVersion");
     methods.insert("eth_sendRawTransaction");
-    methods.insert("eth_submitHashrate");
-    methods.insert("eth_submitWork");
     methods.insert("eth_syncing");
     methods.insert("eth_uninstallFilter");
 
