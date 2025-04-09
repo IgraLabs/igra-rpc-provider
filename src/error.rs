@@ -15,6 +15,10 @@ pub enum AppError {
     /// Error indicates a failure in executing a call to the KASPA Wallet.
     #[error("KASPA Wallet call failed")]
     WalletCallError,
+
+    /// Error indicates that the requested RPC method is not allowed.
+    #[error("RPC method not allowed")]
+    MethodNotAllowed(String),
 }
 
 impl AppError {
@@ -27,9 +31,14 @@ impl AppError {
     /// A `serde_json::Value` object representing the JSON-RPC error response.
     pub fn to_json_rpc_error(&self, id: Value) -> Value {
         let (code, message) = match self {
-            AppError::InvalidTransactionFormat => (-32001, "Invalid L2 transaction format"),
-            AppError::ElCallError(_) => (-32000, "IGRA EL Client call failed"),
-            AppError::WalletCallError => (-32005, "KASPA Wallet call failed"),
+            AppError::InvalidTransactionFormat => {
+                (-32001, "Invalid L2 transaction format".to_string())
+            }
+            AppError::ElCallError(_) => (-32000, "IGRA EL Client call failed".to_string()),
+            AppError::WalletCallError => (-32005, "KASPA Wallet call failed".to_string()),
+            AppError::MethodNotAllowed(method) => {
+                (-32002, format!("RPC method not allowed: {}", method))
+            }
         };
 
         json!({

@@ -8,3 +8,6 @@ url = "http://igra-dev-el:8545"
 [wallet]
 wallet_daemon_uri = "http://localhost:8082"
 to_address = ""
+
+[security]
+enable_whitelist = true

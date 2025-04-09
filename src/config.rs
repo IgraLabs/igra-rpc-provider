@@ -6,6 +6,7 @@ pub struct AppConfig {
     pub server: ServerConfig,
     pub el: ElConfig,
     pub wallet: WalletConfig,
+    pub security: SecurityConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -23,6 +24,16 @@ pub struct ElConfig {
 pub struct WalletConfig {
     pub wallet_daemon_uri: String,
     pub to_address: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SecurityConfig {
+    #[serde(default = "default_enable_whitelist")]
+    pub enable_whitelist: bool,
+}
+
+fn default_enable_whitelist() -> bool {
+    true
 }
 
 impl AppConfig {
