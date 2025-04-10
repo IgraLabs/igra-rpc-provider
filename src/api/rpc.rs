@@ -1,5 +1,5 @@
 use crate::{
-    config::AppConfig,
+    AppState,
     error::AppError,
     services::{proxy, transaction},
     types::{rpc::RpcRequest, whitelist},
@@ -8,26 +8,81 @@ use axum::{
     extract::{Json, State},
     response::IntoResponse,
 };
-use tracing::{debug, warn};
+use std::sync::Arc;
+use tracing::{info, error, warn, debug};
 
 /// Handles JSON-RPC requests and routes them to the appropriate handler.
 pub async fn handle_rpc(
-    State(config): State<AppConfig>,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<RpcRequest>,
 ) -> impl IntoResponse {
+    let method = req.method.clone();
+    let id = req.id.to_string();
+
     // Check if the whitelist is enabled in configuration
-    if config.security.enable_whitelist && !whitelist::is_method_allowed(&req.method) {
-        warn!("Unauthorized RPC method call attempted: {}", req.method);
-        return Json(AppError::MethodNotAllowed(req.method.clone()).to_json_rpc_error(req.id));
+    if state.config.security.enable_whitelist && !whitelist::is_method_allowed(&method) {
+        warn!("Unauthorized RPC method call attempted: {}", method);
+        return Json(AppError::MethodNotAllowed(method.clone()).to_json_rpc_error(req.id));
     }
 
-    debug!("Processing RPC method: {}", req.method);
+    info!("RPC REQUEST [id={}]: Received method={}", id, method);
 
-    // Method is allowed or whitelist is disabled, proceed with normal processing
-    match req.method.as_str() {
-        "eth_sendRawTransaction" => transaction::handle_send_raw_transaction(req, &config).await,
-        _ => proxy::forward_to_el(req, &config.el.url).await,
-    }
+    let result = match method.as_str() {
+        "eth_sendRawTransaction" => {
+            let params_preview = match req.params.get(0) {
+                Some(param) => {
+                    let s = param.to_string();
+                    if s.len() > 20 {
+                        format!("{}...{}", &s[..10], &s[s.len()-10..])
+                    } else {
+                        s
+                    }
+                },
+                None => "empty".to_string()
+            };
+
+            info!("RPC REQUEST [id={}]: Processing transaction, params={}", id, params_preview);
+
+            // Process transaction and return hash immediately, with background wallet processing
+            let start_time = std::time::Instant::now();
+            let result = transaction::process_transaction(req, &state).await;
+            let duration = start_time.elapsed();
+
+            // Extract result or error for logging
+            if let Some(result_value) = result.get("result") {
+                let tx_hash = result_value.as_str().unwrap_or("unknown");
+                info!("RPC RESPONSE [id={}, hash={}]: Transaction processed successfully, time={:?}",
+                    id, tx_hash, duration);
+            } else if let Some(error) = result.get("error") {
+                error!("RPC RESPONSE [id={}]: Transaction processing failed, error={}, time={:?}",
+                    id, error, duration);
+            }
+
+            axum::Json(result)
+        }
+        // For all other methods, just forward to EL using the original logic
+        _ => {
+            info!("RPC REQUEST [id={}]: Forwarding method={} to execution layer at {}",
+                id, method, state.config.el.url);
+
+            let start_time = std::time::Instant::now();
+            let result = proxy::forward_to_el(req, &state.config.el.url).await;
+            let duration = start_time.elapsed();
+
+            // Extract result or error for logging
+            if result.0.get("error").is_some() {
+                error!("RPC RESPONSE [id={}]: Execution layer returned error: {:?}, time={:?}",
+                    id, result.0.get("error"), duration);
+            } else {
+                info!("RPC RESPONSE [id={}]: Execution layer request completed successfully, time={:?}",
+                    id, duration);
+            }
+
+            result
+        }
+    };
+
+    result
 }
 
 #[cfg(test)]

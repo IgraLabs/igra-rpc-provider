@@ -3,6 +3,7 @@ use thiserror::Error;
 
 /// Custom application error type for handling various types of errors.
 #[derive(Debug, Error)]
+#[allow(dead_code)]
 pub enum AppError {
     /// Error indicates an invalid L2 transaction format.
     #[error("Invalid L2 transaction format")]
@@ -22,6 +23,11 @@ pub enum AppError {
 }
 
 impl AppError {
+    /// Creates a new WalletCallError with the given message
+    pub fn wallet_error<T: Into<String>>(msg: T) -> Self {
+        AppError::WalletCallError
+    }
+
     /// Converts the application error into a JSON-RPC error object.
     ///
     /// # Arguments

@@ -29,12 +29,24 @@ impl WalletCaller {
         } else {
             to_address
         };
-        let password = env::var(PASSWORD_ENV_VAR).map_err(|e| {
-            format!(
-                "Failed to get password from environment variable {}: {}",
-                PASSWORD_ENV_VAR, e
-            )
-        })?;
+
+        // Check for the environment variable with better error handling
+        let password = match env::var(PASSWORD_ENV_VAR) {
+            Ok(pwd) => pwd,
+            Err(env::VarError::NotPresent) => {
+                return Err(format!(
+                    "Environment variable {} is not set. This is required for wallet authentication.",
+                    PASSWORD_ENV_VAR
+                ).into());
+            },
+            Err(env::VarError::NotUnicode(..)) => {
+                return Err(format!(
+                    "Environment variable {} contains invalid Unicode characters.",
+                    PASSWORD_ENV_VAR
+                ).into());
+            }
+        };
+
         Ok(Self {
             wallet_daemon_client: Mutex::new(wallet_daemon_client),
             to_address,
@@ -45,7 +57,9 @@ impl WalletCaller {
     /// Calls the KASPA Wallet to send to KASPA network a transaction with the L2 payload.
     ///
     /// # Parameters:
-    /// - `raw_tx`: A string slice representing the hex-encoded raw transaction to be processed.
+    /// - `payload`: The transaction payload to send to the KASPA wallet
+    /// - `transaction_id`: Optional transaction ID for logging
+    /// - `transaction_hash`: Optional transaction hash for logging
     ///
     /// # Returns:
     /// - `Ok(())` if the command executes successfully.
@@ -56,6 +70,8 @@ impl WalletCaller {
     pub async fn send_transaction(
         &self,
         payload: Vec<u8>,
+        transaction_id: Option<String>,
+        transaction_hash: Option<String>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let transaction_description = Some(TransactionDescription {
             to_address: self.to_address.clone(),
@@ -76,9 +92,18 @@ impl WalletCaller {
             })
             .await?;
 
+        let tx_ids = response.into_inner().transaction_ids;
+
+        let log_prefix = match (transaction_id, transaction_hash) {
+            (Some(id), Some(hash)) => format!("[id={}, hash={}]", id, hash),
+            (Some(id), None) => format!("[id={}]", id),
+            (None, Some(hash)) => format!("[hash={}]", hash),
+            (None, None) => String::new(),
+        };
+
         info!(
-            "Transaction(s) sent successfully: {:?}",
-            response.into_inner().transaction_ids
+            "Transaction{} sent successfully: {:?}",
+            log_prefix, tx_ids
         );
 
         Ok(())

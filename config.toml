@@ -3,10 +3,10 @@ host = "0.0.0.0"
 port = 8535
 
 [el]
-url = "http://igra-dev-el:8545"
+url = "http://execution-layer:8545"
 
 [wallet]
-wallet_daemon_uri = "http://localhost:8082"
+wallet_daemon_uri = "http://kaswallet:8082"
 to_address = ""
 
 [security]
