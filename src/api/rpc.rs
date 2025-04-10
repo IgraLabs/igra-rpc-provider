@@ -29,19 +29,20 @@ pub async fn handle_rpc(
 
     let result = match method.as_str() {
         "eth_sendRawTransaction" => {
-            let params_preview = match req.params.get(0) {
-                Some(param) => {
-                    let s = param.to_string();
-                    if s.len() > 20 {
-                        format!("{}...{}", &s[..10], &s[s.len()-10..])
-                    } else {
-                        s
-                    }
-                },
+            // Get full params
+            let full_params = match req.params.get(0) {
+                Some(param) => param.to_string(),
                 None => "empty".to_string()
             };
 
-            info!("RPC REQUEST [id={}]: Processing transaction, params={}", id, params_preview);
+            // Get payload size if possible
+            let payload_size = req.params.get(0)
+                .and_then(|v| v.as_str())
+                .map(|s| s.len() / 2 - 1) // Rough estimate: hex string / 2 - 1 for 0x
+                .unwrap_or(0);
+
+            info!("RPC REQUEST [id={}]: Processing transaction, params={}, est_payload_size={} bytes",
+                id, full_params, payload_size);
 
             // Process transaction and return hash immediately, with background wallet processing
             let start_time = std::time::Instant::now();
@@ -51,11 +52,11 @@ pub async fn handle_rpc(
             // Extract result or error for logging
             if let Some(result_value) = result.get("result") {
                 let tx_hash = result_value.as_str().unwrap_or("unknown");
-                info!("RPC RESPONSE [id={}, hash={}]: Transaction processed successfully, time={:?}",
-                    id, tx_hash, duration);
+                info!("RPC RESPONSE [id={}, hash={}]: Transaction processed successfully, time={:?}, payload_size={} bytes",
+                    id, tx_hash, duration, payload_size);
             } else if let Some(error) = result.get("error") {
-                error!("RPC RESPONSE [id={}]: Transaction processing failed, error={}, time={:?}",
-                    id, error, duration);
+                error!("RPC RESPONSE [id={}]: Transaction processing failed, error={}, time={:?}, payload={}",
+                    id, error, duration, full_params);
             }
 
             axum::Json(result)

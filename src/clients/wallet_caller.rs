@@ -6,6 +6,7 @@ use std::error::Error;
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 use tracing::info;
+use hex;
 
 const PASSWORD_ENV_VAR: &str = "KASWALLET_PASSWORD";
 
@@ -73,6 +74,10 @@ impl WalletCaller {
         transaction_id: Option<String>,
         transaction_hash: Option<String>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Log the payload details with full payload
+        let payload_size = payload.len();
+        let full_payload = format!("0x{}", hex::encode(&payload));
+
         let transaction_description = Some(TransactionDescription {
             to_address: self.to_address.clone(),
             amount: 0,
@@ -85,6 +90,21 @@ impl WalletCaller {
         });
 
         let mut wallet_daemon_client = self.wallet_daemon_client.lock().await;
+
+        // Create log prefix
+        let log_prefix = match (transaction_id.as_ref(), transaction_hash.as_ref()) {
+            (Some(id), Some(hash)) => format!("[id={}, hash={}]", id, hash),
+            (Some(id), None) => format!("[id={}]", id),
+            (None, Some(hash)) => format!("[hash={}]", hash),
+            (None, None) => String::new(),
+        };
+
+        info!(
+            "Transaction{} sending to wallet, payload_size={}, payload={}",
+            log_prefix, payload_size, full_payload
+        );
+
+        let start = std::time::Instant::now();
         let response = wallet_daemon_client
             .send(SendRequest {
                 transaction_description,
@@ -93,17 +113,11 @@ impl WalletCaller {
             .await?;
 
         let tx_ids = response.into_inner().transaction_ids;
-
-        let log_prefix = match (transaction_id, transaction_hash) {
-            (Some(id), Some(hash)) => format!("[id={}, hash={}]", id, hash),
-            (Some(id), None) => format!("[id={}]", id),
-            (None, Some(hash)) => format!("[hash={}]", hash),
-            (None, None) => String::new(),
-        };
+        let duration = start.elapsed();
 
         info!(
-            "Transaction{} sent successfully: {:?}",
-            log_prefix, tx_ids
+            "Transaction{} sent successfully: {:?}, time={:?}, payload_size={}",
+            log_prefix, tx_ids, duration, payload_size
         );
 
         Ok(())
