@@ -148,7 +148,12 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
         info!("TX [id={}, hash={}]: Transaction queued successfully, queue_time={:?}", id, tx_hash_str, queue_time);
     }
 
-    // Return the hash immediately
+
+    // Sleep for 500ms to simulate processing time not to clog the channel
+    debug!("TX [id={}, hash={}]: Sleeping for 500ms to simulate processing time", id, tx_hash_str);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+
     debug!("TX [id={}, hash={}]: Returning hash to client", id, tx_hash_str);
     json!({
         "jsonrpc": "2.0",
