@@ -7,7 +7,7 @@ url = "http://execution-layer:8545"
 
 [wallet]
 wallet_daemon_uri = "http://kaswallet:8082"
-to_address = ""
+to_address = "kaspadev:qzvhkphk4sjhmx88d9tc948s95nzfktcdteytej7kkxdzgknwwzpztfwkwk53"
 
 [security]
 enable_whitelist = true
