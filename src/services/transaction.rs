@@ -1,4 +1,3 @@
-use crate::clients::wallet_caller::WalletCaller;
 use crate::config::AppConfig;
 use crate::error::AppError;
 use crate::types::rpc::RpcRequest;
@@ -21,6 +20,7 @@ pub struct TransactionRequest {
     pub raw_tx: String,
     pub tx_bytes: Vec<u8>,
     pub id: Value,
+    pub app_state: Arc<AppState>,
 }
 
 /// Creates and starts the background transaction processor
@@ -67,7 +67,7 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
             };
 
             // Call the wallet sequentially for each transaction
-            match process_wallet_call(&tx_request.tx_bytes, &config, id_value).await {
+            match process_wallet_call(&tx_request.tx_bytes, &config, id_value, tx_request.app_state).await {
                 Ok(_) => {
                     let duration = start.elapsed();
                     processed_count += 1;
@@ -88,7 +88,7 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
 }
 
 // Process transaction immediately but queue for sequential wallet calls
-pub async fn process_transaction(req: RpcRequest, state: &Arc<AppState>) -> Value {
+pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value {
     // If ID is null, generate a UUID
     let id_value = if req.id.is_null() {
         let uuid = Uuid::new_v4().to_string();
@@ -136,6 +136,7 @@ pub async fn process_transaction(req: RpcRequest, state: &Arc<AppState>) -> Valu
         raw_tx: req.params[0].as_str().unwrap_or("").to_string(),
         tx_bytes,
         id: id_value.clone(),
+        app_state: state.clone(),
     };
 
     let queue_start = std::time::Instant::now();
@@ -238,7 +239,7 @@ pub fn compute_transaction_hash(tx_bytes: &[u8]) -> H256 {
 }
 
 /// Processes a transaction through the wallet caller
-pub async fn process_wallet_call(tx_bytes: &[u8], config: &AppConfig, id: Value) -> Result<Value, String> {
+pub async fn process_wallet_call(tx_bytes: &[u8], config: &AppConfig, id: Value, app_state: Arc<AppState>) -> Result<Value, String> {
     let id_str = id.to_string();
     let tx_hash: H256 = compute_transaction_hash(tx_bytes);
     let tx_hash_str = format!("{:#x}", tx_hash);
@@ -270,16 +271,7 @@ pub async fn process_wallet_call(tx_bytes: &[u8], config: &AppConfig, id: Value)
         id_str, tx_hash_str, config.wallet.wallet_daemon_uri, payload.len());
     let start = std::time::Instant::now();
 
-    let wallet_caller_result = WalletCaller::new(config.wallet.clone()).await;
-    if let Err(err) = wallet_caller_result {
-        let error_msg = format!("Failed to create WalletCaller: {}", err);
-        error!("WALLET_CALL [id={}, hash={}]: {}", id_str, tx_hash_str, error_msg);
-        return Err(error_msg);
-    }
-
-    let connect_time = start.elapsed();
-    let wallet_caller = wallet_caller_result.unwrap();
-    debug!("WALLET_CALL [id={}, hash={}]: Connected to wallet successfully, connect_time={:?}", id_str, tx_hash_str, connect_time);
+    let wallet_caller = app_state.wallet_caller.clone();
 
     // Actually send the transaction
     info!("WALLET_CALL [id={}, hash={}]: Sending transaction to wallet, payload_size={}",

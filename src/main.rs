@@ -11,13 +11,15 @@ use services::transaction::{TransactionRequest, start_transaction_processor};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use crate::clients::wallet_caller::WalletCaller;
 
 // Define a type for our shared state
 pub struct AppState {
     pub config: AppConfig,
     pub transaction_sender: mpsc::Sender<TransactionRequest>,
+    pub wallet_caller: Arc<WalletCaller>
 }
 
 #[tokio::main]
@@ -44,10 +46,18 @@ async fn main() {
     let transaction_sender = start_transaction_processor(config.clone());
     info!("Transaction processor started");
 
+    let wallet_caller_result = WalletCaller::new(config.wallet.clone()).await;
+    if let Err(err) = wallet_caller_result {
+        error!("Failed to create WalletCaller: {}", err);
+        return
+    }
+    let wallet_caller = Arc::new(wallet_caller_result.unwrap());
+
     // Set up the shared state
     let state = Arc::new(AppState {
         config,
         transaction_sender,
+        wallet_caller,
     });
 
     // Build the Axum router

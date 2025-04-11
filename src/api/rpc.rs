@@ -46,7 +46,7 @@ pub async fn handle_rpc(
 
             // Process transaction and return hash immediately, with background wallet processing
             let start_time = std::time::Instant::now();
-            let result = transaction::process_transaction(req, &state).await;
+            let result = transaction::process_transaction(req, state.clone()).await;
             let duration = start_time.elapsed();
 
             // Extract result or error for logging
