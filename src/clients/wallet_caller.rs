@@ -21,7 +21,7 @@ impl WalletCaller {
         let mut wallet_daemon_client =
             WalletClient::connect(wallet_config.wallet_daemon_uri.clone()).await?;
         let to_address = wallet_config.to_address.clone();
-        let to_address = if to_address == "" {
+        let to_address = if to_address.is_empty() {
             wallet_daemon_client
                 .new_address(NewAddressRequest {})
                 .await?
