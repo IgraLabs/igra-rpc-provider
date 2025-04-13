@@ -153,8 +153,10 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
     let tx_hash = compute_transaction_hash(&tx_bytes);
     let tx_hash_str = format!("{:#x}", tx_hash);
 
-    info!("TX [id={}, hash={}]: Computed hash, now queueing for background processing, payload_size={}",
-        id, tx_hash_str, tx_bytes.len());
+    // Log available capacity
+    let available = state.transaction_sender.capacity();
+    info!("TX [id={}, hash={}]: Computed hash, now queueing for background processing, payload_size={}, available_capacity={}",
+        id, tx_hash_str, tx_bytes.len(), available);
 
     // Queue the transaction for sequential processing
     let tx_request = TransactionRequest {
@@ -167,15 +169,18 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
     let queue_start = std::time::Instant::now();
     if let Err(e) = state.transaction_sender.send(tx_request).await {
         error!(
-            "TX [id={}, hash={}]: Failed to queue transaction: {}",
-            id, tx_hash_str, e
+            "TX [id={}, hash={}]: Failed to queue transaction: {}, available_capacity={}",
+            id,
+            tx_hash_str,
+            e,
+            state.transaction_sender.capacity()
         );
         // Even if queueing fails, we still return the hash to the user
     } else {
         let queue_time = queue_start.elapsed();
         info!(
-            "TX [id={}, hash={}]: Transaction queued successfully, queue_time={:?}",
-            id, tx_hash_str, queue_time
+            "TX [id={}, hash={}]: Transaction queued successfully, queue_time={:?}, available_capacity={}",
+            id, tx_hash_str, queue_time, state.transaction_sender.capacity()
         );
     }
 
