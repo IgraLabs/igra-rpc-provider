@@ -1,4 +1,5 @@
 use crate::config::WalletConfig;
+use hex;
 use kaswallet_proto::kaswallet_proto::wallet_client::WalletClient;
 use kaswallet_proto::kaswallet_proto::{NewAddressRequest, SendRequest, TransactionDescription};
 use std::env;
@@ -6,7 +7,6 @@ use std::error::Error;
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 use tracing::info;
-use hex;
 
 const PASSWORD_ENV_VAR: &str = "KASWALLET_PASSWORD";
 
@@ -39,12 +39,13 @@ impl WalletCaller {
                     "Environment variable {} is not set. This is required for wallet authentication.",
                     PASSWORD_ENV_VAR
                 ).into());
-            },
+            }
             Err(env::VarError::NotUnicode(..)) => {
                 return Err(format!(
                     "Environment variable {} contains invalid Unicode characters.",
                     PASSWORD_ENV_VAR
-                ).into());
+                )
+                .into());
             }
         };
 

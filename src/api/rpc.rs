@@ -1,15 +1,15 @@
 use crate::{
-    AppState,
     error::AppError,
     services::{proxy, transaction},
     types::{rpc::RpcRequest, whitelist},
+    AppState,
 };
 use axum::{
     extract::{Json, State},
     response::IntoResponse,
 };
 use std::sync::Arc;
-use tracing::{info, error, warn, debug};
+use tracing::{error, info, warn};
 
 /// Handles JSON-RPC requests and routes them to the appropriate handler.
 pub async fn handle_rpc(
@@ -32,17 +32,21 @@ pub async fn handle_rpc(
             // Get full params
             let full_params = match req.params.get(0) {
                 Some(param) => param.to_string(),
-                None => "empty".to_string()
+                None => "empty".to_string(),
             };
 
             // Get payload size if possible
-            let payload_size = req.params.get(0)
+            let payload_size = req
+                .params
+                .get(0)
                 .and_then(|v| v.as_str())
                 .map(|s| s.len() / 2 - 1) // Rough estimate: hex string / 2 - 1 for 0x
                 .unwrap_or(0);
 
-            info!("RPC REQUEST [id={}]: Processing transaction, params={}, est_payload_size={} bytes",
-                id, full_params, payload_size);
+            info!(
+                "RPC REQUEST [id={}]: Processing transaction, params={}, est_payload_size={} bytes",
+                id, full_params, payload_size
+            );
 
             // Process transaction and return hash immediately, with background wallet processing
             let start_time = std::time::Instant::now();
@@ -63,8 +67,10 @@ pub async fn handle_rpc(
         }
         // For all other methods, just forward to EL using the original logic
         _ => {
-            info!("RPC REQUEST [id={}]: Forwarding method={} to execution layer at {}",
-                id, method, state.config.el.url);
+            info!(
+                "RPC REQUEST [id={}]: Forwarding method={} to execution layer at {}",
+                id, method, state.config.el.url
+            );
 
             let start_time = std::time::Instant::now();
             let result = proxy::forward_to_el(req, &state.config.el.url).await;
@@ -72,8 +78,12 @@ pub async fn handle_rpc(
 
             // Extract result or error for logging
             if result.0.get("error").is_some() {
-                error!("RPC RESPONSE [id={}]: Execution layer returned error: {:?}, time={:?}",
-                    id, result.0.get("error"), duration);
+                error!(
+                    "RPC RESPONSE [id={}]: Execution layer returned error: {:?}, time={:?}",
+                    id,
+                    result.0.get("error"),
+                    duration
+                );
             } else {
                 info!("RPC RESPONSE [id={}]: Execution layer request completed successfully, time={:?}",
                     id, duration);
@@ -89,6 +99,7 @@ pub async fn handle_rpc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AppConfig;
     use crate::config::{ElConfig, SecurityConfig, ServerConfig, WalletConfig};
     use axum::{body::to_bytes, extract::State};
     use serde_json::{json, Value};

@@ -5,21 +5,21 @@ mod error;
 mod services;
 mod types;
 
+use crate::clients::wallet_caller::WalletCaller;
 use axum::{routing::post, Router};
 use config::AppConfig;
-use services::transaction::{TransactionRequest, start_transaction_processor};
+use services::transaction::{start_transaction_processor, TransactionRequest};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
-use crate::clients::wallet_caller::WalletCaller;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 // Define a type for our shared state
 pub struct AppState {
     pub config: AppConfig,
     pub transaction_sender: mpsc::Sender<TransactionRequest>,
-    pub wallet_caller: Arc<WalletCaller>
+    pub wallet_caller: Arc<WalletCaller>,
 }
 
 #[tokio::main]
@@ -49,7 +49,7 @@ async fn main() {
     let wallet_caller_result = WalletCaller::new(config.wallet.clone()).await;
     if let Err(err) = wallet_caller_result {
         error!("Failed to create WalletCaller: {}", err);
-        return
+        return;
     }
     let wallet_caller = Arc::new(wallet_caller_result.unwrap());
 
@@ -83,19 +83,20 @@ async fn main() {
 /// Sets up comprehensive logging
 fn setup_logging() {
     // Default to INFO level but allow override via env var
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| {
-            EnvFilter::new("info")
-                .add_directive("igra_rpc_provider=debug".parse().unwrap())
-                .add_directive("tower_http=debug".parse().unwrap())
-        });
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("info")
+            .add_directive("igra_rpc_provider=debug".parse().unwrap())
+            .add_directive("tower_http=debug".parse().unwrap())
+    });
 
     // Create and register the subscriber with console output only
     tracing_subscriber::registry()
-        .with(fmt::layer()
-            .with_ansi(true)
-            .with_target(true)
-            .with_thread_ids(true))
+        .with(
+            fmt::layer()
+                .with_ansi(true)
+                .with_target(true)
+                .with_thread_ids(true),
+        )
         .with(env_filter)
         .init();
 

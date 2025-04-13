@@ -23,11 +23,6 @@ pub enum AppError {
 }
 
 impl AppError {
-    /// Creates a new WalletCallError with the given message
-    pub fn wallet_error<T: Into<String>>(msg: T) -> Self {
-        AppError::WalletCallError
-    }
-
     /// Converts the application error into a JSON-RPC error object.
     ///
     /// # Arguments

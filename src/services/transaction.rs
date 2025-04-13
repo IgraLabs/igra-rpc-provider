@@ -27,7 +27,10 @@ pub struct TransactionRequest {
 /// Returns a channel sender that can be used to queue transactions
 pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<TransactionRequest> {
     let (transaction_sender, mut transaction_receiver) = mpsc::channel::<TransactionRequest>(1024);
-    info!("TX_PROCESSOR: Starting transaction processor with queue size={}", 1024);
+    info!(
+        "TX_PROCESSOR: Starting transaction processor with queue size={}",
+        1024
+    );
 
     // Start the sequential transaction processor task
     let config = Arc::new(config);
@@ -45,7 +48,10 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
             // Generate a proper ID string, using UUID if the original ID is null or invalid
             let id_str = if tx_request.id.is_null() {
                 let uuid = Uuid::new_v4().to_string();
-                info!("TX_PROCESSOR [hash={}]: Received transaction with null ID, assigning UUID: {}", tx_hash_str, uuid);
+                info!(
+                    "TX_PROCESSOR [hash={}]: Received transaction with null ID, assigning UUID: {}",
+                    tx_hash_str, uuid
+                );
                 uuid
             } else {
                 tx_request.id.to_string()
@@ -54,8 +60,13 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
             // Log full payload bytes
             let full_payload = format!("0x{}", hex::encode(&tx_request.tx_bytes));
 
-            info!("TX_PROCESSOR [id={}, hash={}]: Processing transaction, bytes={}, payload={}",
-                id_str, tx_hash_str, tx_request.tx_bytes.len(), full_payload);
+            info!(
+                "TX_PROCESSOR [id={}, hash={}]: Processing transaction, bytes={}, payload={}",
+                id_str,
+                tx_hash_str,
+                tx_request.tx_bytes.len(),
+                full_payload
+            );
 
             let start = std::time::Instant::now();
 
@@ -67,13 +78,20 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
             };
 
             // Call the wallet sequentially for each transaction
-            match process_wallet_call(&tx_request.tx_bytes, &config, id_value, tx_request.app_state).await {
+            match process_wallet_call(
+                &tx_request.tx_bytes,
+                &config,
+                id_value,
+                tx_request.app_state,
+            )
+            .await
+            {
                 Ok(_) => {
                     let duration = start.elapsed();
                     processed_count += 1;
                     info!("TX_PROCESSOR [id={}, hash={}]: Transaction processed successfully, time={:?}, payload_size={}, total_success={}, total_errors={}",
                         id_str, tx_hash_str, duration, tx_request.tx_bytes.len(), processed_count, error_count);
-                },
+                }
                 Err(err) => {
                     let duration = start.elapsed();
                     error_count += 1;
@@ -102,10 +120,13 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
     // Get the full transaction params for logging
     let full_params = match req.params.get(0) {
         Some(param) => param.to_string(),
-        None => "empty".to_string()
+        None => "empty".to_string(),
     };
 
-    info!("TX [id={}]: Processing transaction request, params={}", id, full_params);
+    info!(
+        "TX [id={}]: Processing transaction request, params={}",
+        id, full_params
+    );
 
     // Validate transaction
     let (validation_result, tx_bytes_opt) = validate_transaction(&req);
@@ -121,8 +142,12 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
     // Log full bytes
     let full_bytes = format!("0x{}", hex::encode(&tx_bytes));
 
-    debug!("TX [id={}]: Transaction validated successfully, tx_bytes_len={}, bytes={}",
-        id, tx_bytes.len(), full_bytes);
+    debug!(
+        "TX [id={}]: Transaction validated successfully, tx_bytes_len={}, bytes={}",
+        id,
+        tx_bytes.len(),
+        full_bytes
+    );
 
     // Compute transaction hash immediately
     let tx_hash = compute_transaction_hash(&tx_bytes);
@@ -141,20 +166,30 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
 
     let queue_start = std::time::Instant::now();
     if let Err(e) = state.transaction_sender.send(tx_request).await {
-        error!("TX [id={}, hash={}]: Failed to queue transaction: {}", id, tx_hash_str, e);
+        error!(
+            "TX [id={}, hash={}]: Failed to queue transaction: {}",
+            id, tx_hash_str, e
+        );
         // Even if queueing fails, we still return the hash to the user
     } else {
         let queue_time = queue_start.elapsed();
-        info!("TX [id={}, hash={}]: Transaction queued successfully, queue_time={:?}", id, tx_hash_str, queue_time);
+        info!(
+            "TX [id={}, hash={}]: Transaction queued successfully, queue_time={:?}",
+            id, tx_hash_str, queue_time
+        );
     }
 
-
     // Sleep for 500ms to simulate processing time not to clog the channel
-    debug!("TX [id={}, hash={}]: Sleeping for 500ms to simulate processing time", id, tx_hash_str);
+    debug!(
+        "TX [id={}, hash={}]: Sleeping for 500ms to simulate processing time",
+        id, tx_hash_str
+    );
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-
-    debug!("TX [id={}, hash={}]: Returning hash to client", id, tx_hash_str);
+    debug!(
+        "TX [id={}, hash={}]: Returning hash to client",
+        id, tx_hash_str
+    );
     json!({
         "jsonrpc": "2.0",
         "result": tx_hash_str,
@@ -174,12 +209,19 @@ pub fn validate_transaction(req: &RpcRequest) -> (Result<(), Value>, Option<Vec<
     let raw_tx = req.params[0].as_str().unwrap_or("");
 
     // Log full transaction request
-    debug!("TX_VALIDATE [id={}]: Validating transaction, raw_tx_len={}, raw_tx={}",
-        id, raw_tx.len(), raw_tx);
+    debug!(
+        "TX_VALIDATE [id={}]: Validating transaction, raw_tx_len={}, raw_tx={}",
+        id,
+        raw_tx.len(),
+        raw_tx
+    );
 
     // Check if transaction starts with 0x
     if !raw_tx.starts_with("0x") {
-        warn!("TX_VALIDATE [id={}]: Raw transaction doesn't start with '0x'", id);
+        warn!(
+            "TX_VALIDATE [id={}]: Raw transaction doesn't start with '0x'",
+            id
+        );
         return (
             Err(AppError::InvalidTransactionFormat.to_json_rpc_error(req.id.clone())),
             None,
@@ -203,10 +245,15 @@ pub fn validate_transaction(req: &RpcRequest) -> (Result<(), Value>, Option<Vec<
             // Log full bytes
             let full_bytes = format!("0x{}", hex::encode(&bytes));
 
-            debug!("TX_VALIDATE [id={}, hash={}]: Hex decoded successfully, bytes_len={}, bytes={}",
-                id, hash, bytes.len(), full_bytes);
+            debug!(
+                "TX_VALIDATE [id={}, hash={}]: Hex decoded successfully, bytes_len={}, bytes={}",
+                id,
+                hash,
+                bytes.len(),
+                full_bytes
+            );
             bytes
-        },
+        }
         Err(e) => {
             warn!("TX_VALIDATE [id={}]: Invalid hex format: {}", id, e);
             return (
@@ -222,7 +269,7 @@ pub fn validate_transaction(req: &RpcRequest) -> (Result<(), Value>, Option<Vec<
             let hash = format!("{:#x}", compute_transaction_hash(&tx_bytes));
             debug!("TX_VALIDATE [id={}, hash={}]: RLP decoded successfully, nonce={:?}, gas_price={:?}",
                 id, hash, tx.nonce, tx.gas_price);
-        },
+        }
         Err(e) => {
             warn!("TX_VALIDATE [id={}]: Failed to decode RLP: {}", id, e);
             return (
@@ -234,7 +281,10 @@ pub fn validate_transaction(req: &RpcRequest) -> (Result<(), Value>, Option<Vec<
 
     // Return successful validation with decoded bytes
     let hash = format!("{:#x}", compute_transaction_hash(&tx_bytes));
-    debug!("TX_VALIDATE [id={}, hash={}]: Validation successful", id, hash);
+    debug!(
+        "TX_VALIDATE [id={}, hash={}]: Validation successful",
+        id, hash
+    );
     (Ok(()), Some(tx_bytes))
 }
 
@@ -244,7 +294,12 @@ pub fn compute_transaction_hash(tx_bytes: &[u8]) -> H256 {
 }
 
 /// Processes a transaction through the wallet caller
-pub async fn process_wallet_call(tx_bytes: &[u8], config: &AppConfig, id: Value, app_state: Arc<AppState>) -> Result<Value, String> {
+pub async fn process_wallet_call(
+    tx_bytes: &[u8],
+    config: &AppConfig,
+    id: Value,
+    app_state: Arc<AppState>,
+) -> Result<Value, String> {
     let id_str = id.to_string();
     let tx_hash: H256 = compute_transaction_hash(tx_bytes);
     let tx_hash_str = format!("{:#x}", tx_hash);
@@ -256,11 +311,17 @@ pub async fn process_wallet_call(tx_bytes: &[u8], config: &AppConfig, id: Value,
         id_str, tx_hash_str, tx_bytes.len(), full_payload);
 
     // Prepare the payload for wallet call
-    debug!("WALLET_CALL [id={}, hash={}]: Preparing payload", id_str, tx_hash_str);
+    debug!(
+        "WALLET_CALL [id={}, hash={}]: Preparing payload",
+        id_str, tx_hash_str
+    );
     let payload_result = prepare_payload(tx_bytes);
     if let Err(err) = payload_result {
         let error_msg = format!("Failed to prepare payload: {}", err);
-        error!("WALLET_CALL [id={}, hash={}]: {}", id_str, tx_hash_str, error_msg);
+        error!(
+            "WALLET_CALL [id={}, hash={}]: {}",
+            id_str, tx_hash_str, error_msg
+        );
         return Err(error_msg);
     }
     let payload = payload_result.unwrap();
@@ -268,32 +329,48 @@ pub async fn process_wallet_call(tx_bytes: &[u8], config: &AppConfig, id: Value,
     // Log full compressed payload
     let full_compressed_payload = format!("0x{}", hex::encode(&payload));
 
-    debug!("WALLET_CALL [id={}, hash={}]: Payload prepared successfully, size={} bytes, payload={}",
-        id_str, tx_hash_str, payload.len(), full_compressed_payload);
+    debug!(
+        "WALLET_CALL [id={}, hash={}]: Payload prepared successfully, size={} bytes, payload={}",
+        id_str,
+        tx_hash_str,
+        payload.len(),
+        full_compressed_payload
+    );
 
     // Call the KASPA Wallet for sending the transaction to the Base Layer
-    info!("WALLET_CALL [id={}, hash={}]: Connecting to KASPA Wallet at {}, payload_size={}",
-        id_str, tx_hash_str, config.wallet.wallet_daemon_uri, payload.len());
+    info!(
+        "WALLET_CALL [id={}, hash={}]: Connecting to KASPA Wallet at {}, payload_size={}",
+        id_str,
+        tx_hash_str,
+        config.wallet.wallet_daemon_uri,
+        payload.len()
+    );
     let start = std::time::Instant::now();
 
     let wallet_caller = app_state.wallet_caller.clone();
 
     // Actually send the transaction
-    info!("WALLET_CALL [id={}, hash={}]: Sending transaction to wallet, payload_size={}",
-        id_str, tx_hash_str, payload.len());
+    info!(
+        "WALLET_CALL [id={}, hash={}]: Sending transaction to wallet, payload_size={}",
+        id_str,
+        tx_hash_str,
+        payload.len()
+    );
     let send_start = std::time::Instant::now();
 
     // Capture payload size before moving it
     let payload_size = payload.len();
 
-    if let Err(err) = wallet_caller.send_transaction(
-        payload,
-        Some(id_str.clone()),
-        Some(tx_hash_str.clone())
-    ).await {
+    if let Err(err) = wallet_caller
+        .send_transaction(payload, Some(id_str.clone()), Some(tx_hash_str.clone()))
+        .await
+    {
         let error_msg = format!("KASPA Wallet call failed: {}", err);
         let duration = send_start.elapsed();
-        error!("WALLET_CALL [id={}, hash={}]: Send failed: {}, time={:?}", id_str, tx_hash_str, error_msg, duration);
+        error!(
+            "WALLET_CALL [id={}, hash={}]: Send failed: {}, time={:?}",
+            id_str, tx_hash_str, error_msg, duration
+        );
         return Err(error_msg);
     }
 
