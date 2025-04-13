@@ -9,7 +9,7 @@ COPY ./ ./
 
 # Install OpenSSL 3 development headers (available in Bookworm environment)
 RUN apt-get update && apt-get install -y \
-    libssl-dev pkg-config && apt-get clean
+    libssl-dev pkg-config protobuf-compiler && apt-get clean
 
 # Build igra-rpc-provider in release mode
 RUN cargo build --release --bin igra-rpc-provider
