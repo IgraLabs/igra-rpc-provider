@@ -43,7 +43,10 @@ pub async fn send_rpc_request(req: &Value, rpc_url: &str) -> Result<Value, AppEr
         None => "unknown".to_string(),
     };
 
-    debug!("EL_CLIENT [id={}]: Sending method={} to {}", req_id, method, rpc_url);
+    debug!(
+        "EL_CLIENT [id={}]: Sending method={} to {}",
+        req_id, method, rpc_url
+    );
 
     // Start timing
     let start = std::time::Instant::now();
@@ -53,14 +56,18 @@ pub async fn send_rpc_request(req: &Value, rpc_url: &str) -> Result<Value, AppEr
         Ok(resp) => {
             let status = resp.status();
             let duration = start.elapsed();
-            debug!("EL_CLIENT [id={}]: Received HTTP response status={}, time={:?}",
-                req_id, status, duration);
+            debug!(
+                "EL_CLIENT [id={}]: Received HTTP response status={}, time={:?}",
+                req_id, status, duration
+            );
             resp
-        },
+        }
         Err(err) => {
             let duration = start.elapsed();
-            error!("EL_CLIENT [id={}]: HTTP request failed: {}, time={:?}",
-                req_id, err, duration);
+            error!(
+                "EL_CLIENT [id={}]: HTTP request failed: {}, time={:?}",
+                req_id, err, duration
+            );
             return Err(AppError::ElCallError(err));
         }
     };
@@ -72,19 +79,25 @@ pub async fn send_rpc_request(req: &Value, rpc_url: &str) -> Result<Value, AppEr
 
             if json.get("error").is_some() {
                 let err_details = json.get("error").unwrap();
-                error!("EL_CLIENT [id={}]: JSON-RPC error in response: {:?}, time={:?}",
-                    req_id, err_details, duration);
+                error!(
+                    "EL_CLIENT [id={}]: JSON-RPC error in response: {:?}, time={:?}",
+                    req_id, err_details, duration
+                );
             } else {
-                debug!("EL_CLIENT [id={}]: Successful response for method={}, time={:?}",
-                    req_id, method, duration);
+                debug!(
+                    "EL_CLIENT [id={}]: Successful response for method={}, time={:?}",
+                    req_id, method, duration
+                );
             }
 
             Ok(json)
-        },
+        }
         Err(err) => {
             let duration = start.elapsed();
-            error!("EL_CLIENT [id={}]: Failed to parse JSON response: {}, time={:?}",
-                req_id, err, duration);
+            error!(
+                "EL_CLIENT [id={}]: Failed to parse JSON response: {}, time={:?}",
+                req_id, err, duration
+            );
             Err(AppError::ElCallError(err))
         }
     }
