@@ -21,6 +21,7 @@ pub struct TransactionRequest {
     pub tx_bytes: Vec<u8>,
     pub id: Value,
     pub app_state: Arc<AppState>,
+    pub response_sender: mpsc::Sender<Result<(), String>>,
 }
 
 /// Creates and starts the background transaction processor
@@ -78,26 +79,36 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
             };
 
             // Call the wallet sequentially for each transaction
-            match process_wallet_call(
+            let process_wallet_result = process_wallet_call(
                 &tx_request.tx_bytes,
                 &config,
                 id_value,
                 tx_request.app_state,
             )
-            .await
-            {
+            .await;
+            let response = match process_wallet_result {
                 Ok(_) => {
                     let duration = start.elapsed();
                     processed_count += 1;
                     info!("TX_PROCESSOR [id={}, hash={}]: Transaction processed successfully, time={:?}, payload_size={}, total_success={}, total_errors={}",
                         id_str, tx_hash_str, duration, tx_request.tx_bytes.len(), processed_count, error_count);
+                    Ok(())
                 }
                 Err(err) => {
                     let duration = start.elapsed();
                     error_count += 1;
                     error!("TX_PROCESSOR [id={}, hash={}]: Transaction failed: {}, time={:?}, payload_size={}, total_success={}, total_errors={}",
                         id_str, tx_hash_str, err, duration, tx_request.tx_bytes.len(), processed_count, error_count);
+                    Err(err)
                 }
+            };
+            // Send the response back to the sender
+            let send_response_result = tx_request.response_sender.send(response).await;
+            if let Err(e) = send_response_result {
+                error!(
+                    "TX_PROCESSOR [id={}, hash={}]: Failed to send response: {}",
+                    id_str, tx_hash_str, e
+                );
             }
         }
     });
@@ -158,12 +169,14 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
     info!("TX [id={}, hash={}]: Computed hash, now queueing for background processing, payload_size={}, available_capacity={}",
         id, tx_hash_str, tx_bytes.len(), available);
 
+    let (response_sender, mut response_receiver) = mpsc::channel::<Result<(), String>>(1);
     // Queue the transaction for sequential processing
     let tx_request = TransactionRequest {
         raw_tx: req.params[0].as_str().unwrap_or("").to_string(),
         tx_bytes,
         id: id_value.clone(),
         app_state: state.clone(),
+        response_sender,
     };
 
     let queue_start = std::time::Instant::now();
@@ -184,12 +197,18 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
         );
     }
 
-    // Sleep for 500ms to simulate processing time not to clog the channel
-    debug!(
-        "TX [id={}, hash={}]: Sleeping for 500ms to simulate processing time",
-        id, tx_hash_str
-    );
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let response = response_receiver.recv().await.unwrap(); // unwrap is safe, nobody ever closes the channel
+
+    if let Err(e) = response {
+        return json!({
+            "jsonrpc": "2.0",
+            "error": {
+                "code": -32603,
+                "message": format!("Error processing transaction: {}", e)
+            },
+            "id": id_value
+        });
+    }
 
     debug!(
         "TX [id={}, hash={}]: Returning hash to client",
