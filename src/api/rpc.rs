@@ -121,16 +121,6 @@ mod tests {
         }
     }
 
-    // Helper to create RPC request with arbitrary method
-    fn create_rpc_request(method: &str) -> RpcRequest {
-        RpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: method.to_string(),
-            params: json!([]),
-            id: json!(1),
-        }
-    }
-
     // Direct test for whitelist validation without involving the full handler
     #[test]
     fn test_method_allowed_by_whitelist() {
