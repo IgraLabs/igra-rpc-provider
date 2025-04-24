@@ -1,5 +1,7 @@
-use config::{Config, Environment, File};
+use config::{Config, File};
 use serde::Deserialize;
+use std::env;
+use tracing::debug;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
@@ -38,31 +40,35 @@ fn default_enable_whitelist() -> bool {
 
 impl AppConfig {
     pub fn load() -> Self {
-        let mut settings = Config::builder()
-            .add_source(File::with_name("config"))
-            .add_source(
-                Environment::default()
-                    .separator("_") // Use "_" to allow nested structures
-                    .prefix(""),    // Ensure there is no optional prefix
-            );
+        // Create a mapping of environment variables to config paths
+        let env_mappings = [
+            ("SERVER_HOST", "server.host"),
+            ("SERVER_PORT", "server.port"),
+            ("EL_URL", "el.url"),
+            ("WALLET_DAEMON_URI", "wallet.wallet_daemon_uri"),
+            ("WALLET_TO_ADDRESS", "wallet.to_address"),
+            ("SECURITY_ENABLE_WHITELIST", "security.enable_whitelist"),
+        ];
 
-        // @todo Make env vars to overwrite defaults w/o this manual mapping.
-        for (key, value) in std::env::vars() {
-            let mapped_key = match key.as_str() {
-                "SERVER_HOST" => "server.host",
-                "SERVER_PORT" => "server.port",
-                "EL_URL" => "el.url",
-                "WALLET_DAEMON_URI" => "wallet.wallet_daemon_uri",
-                "WALLET_TO_ADDRESS" => "wallet.to_address",
-                "SECURITY_ENABLE_WHITELIST" => "security.enable_whitelist",
-                _ => continue, // Skip irrelevant
-            };
-            settings = settings.set_override(mapped_key, value).unwrap();
+        // Load base config from file
+        let mut builder = Config::builder()
+            .add_source(File::with_name("config").required(true));
+
+        // Apply environment variable overrides
+        for (env_var, config_path) in env_mappings {
+            if let Ok(value) = env::var(env_var) {
+                debug!("Overriding {} with value: {}", config_path, &value);
+                builder = builder.set_override(config_path, value).unwrap();
+            }
         }
 
-        settings
+        let config = builder
             .build()
-            .unwrap()
-            .try_deserialize().expect("Invalid config format")
+            .unwrap_or_else(|err| panic!("Failed to load configuration: {}", err))
+            .try_deserialize()
+            .unwrap_or_else(|err| panic!("Failed to deserialize configuration: {}", err));
+
+        debug!("Loaded config: {:?}", config);
+        config
     }
 }
