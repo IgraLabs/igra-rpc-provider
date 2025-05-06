@@ -51,14 +51,15 @@ impl AppConfig {
         ];
 
         // Load base config from file
-        let mut builder = Config::builder()
-            .add_source(File::with_name("config").required(true));
+        let mut builder = Config::builder().add_source(File::with_name("config").required(true));
 
         // Apply environment variable overrides
         for (env_var, config_path) in env_mappings {
             if let Ok(value) = env::var(env_var) {
                 debug!("Overriding {} with value: {}", config_path, &value);
-                builder = builder.set_override(config_path, value).unwrap();
+                builder = builder
+                    .set_override(config_path, value)
+                    .expect("Failed to set config override from env var");
             }
         }
 

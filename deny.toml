@@ -1,0 +1,87 @@
+# https://embarkstudios.github.io/cargo-deny/index.html
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-unknown-linux-musl" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" },
+    { triple = "wasm32-unknown-unknown" },
+    { triple = "wasm32-wasi" },
+    { triple = "aarch64-linux-android" },
+    { triple = "aarch64-apple-ios" },
+]
+all-features = true
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = [
+    "RUSTSEC-2024-0384", # instant is unmaintained
+    "RUSTSEC-2025-0010", # ring 0.16 unmaintained
+    "RUSTSEC-2025-0009", # ring 0.16 AES vulnerability
+]
+yanked = "deny"
+
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "CC-BY-1.0",
+    "CC-BY-2.0",
+    "CC-BY-3.0",
+    "CC-BY-4.0",
+    "ISC",
+    "OpenSSL",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "Unlicense",
+    "MPL-2.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.8
+unused-allowed-license = "allow"
+
+[licenses.private]
+ignore = false
+registries = []
+
+[[licenses.clarify]]
+name = "ring"
+version = "0.16.20"
+expression = "OpenSSL"
+license-files = [
+    { path = "LICENSE", hash = 0xbd0eed23 }
+]
+
+[bans]
+allow-wildcard-paths = true
+multiple-versions = "warn"
+wildcards = "warn"
+highlight = "all"
+
+[bans.workspace-dependencies]
+duplicates = 'deny'
+unused = 'deny'
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+    "https://github.com/IgraLabs/kaswallet-proto.git",
+]
+
+[sources.allow-org]
+github = []
+gitlab = []
+bitbucket = []

@@ -1,0 +1,37 @@
+name: UB (undefined behavior) detection
+
+on:
+  pull_request:
+    branches: [ "main" ]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Dwarnings"
+  MIRIFLAGS: "-Zmiri-strict-provenance"
+
+jobs:
+  ub_detection:
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    name: Check for undefined behaviour (UB) with Miri
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly toolchain with Miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Install Protobuf Compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Cache dependencies and Miri builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Miri tests
+        run: cargo +nightly miri test --all-features

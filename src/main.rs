@@ -32,7 +32,11 @@ async fn main() {
 
     // Parse and create a socket address from the configuration
     let addr = SocketAddr::from((
-        config.server.host.parse::<std::net::IpAddr>().unwrap(),
+        config
+            .server
+            .host
+            .parse::<std::net::IpAddr>()
+            .expect("Invalid IP address for server.host in configuration"),
         config.server.port,
     ));
 
@@ -51,7 +55,9 @@ async fn main() {
         error!("Failed to create WalletCaller: {}", err);
         return;
     }
-    let wallet_caller = Arc::new(wallet_caller_result.unwrap());
+    let wallet_caller = Arc::new(
+        wallet_caller_result.expect("WalletCaller should have been successfully initialized"),
+    );
 
     // Set up the shared state
     let state = Arc::new(AppState {
@@ -85,8 +91,16 @@ fn setup_logging() {
     // Default to INFO level but allow override via env var
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new("info")
-            .add_directive("igra_rpc_provider=debug".parse().unwrap())
-            .add_directive("tower_http=debug".parse().unwrap())
+            .add_directive(
+                "igra_rpc_provider=debug"
+                    .parse()
+                    .expect("Failed to parse static 'igra_rpc_provider=debug' directive"),
+            )
+            .add_directive(
+                "tower_http=debug"
+                    .parse()
+                    .expect("Failed to parse static 'tower_http=debug' directive"),
+            )
     });
 
     // Create and register the subscriber with console output only
