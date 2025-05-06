@@ -78,7 +78,9 @@ pub async fn send_rpc_request(req: &Value, rpc_url: &str) -> Result<Value, AppEr
             let duration = start.elapsed();
 
             if json.get("error").is_some() {
-                let err_details = json.get("error").unwrap();
+                let err_details = json
+                    .get("error")
+                    .expect("Error field should exist due to prior is_some() check");
                 error!(
                     "EL_CLIENT [id={}]: JSON-RPC error in response: {:?}, time={:?}",
                     req_id, err_details, duration

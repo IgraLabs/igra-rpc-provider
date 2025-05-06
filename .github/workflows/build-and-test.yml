@@ -1,25 +1,37 @@
-name: Rust
+name: Build and test code
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ "master" ]
-  workflow_dispatch:  # Allow manual trigger
+    branches: [ "main" ]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  build_and_test:
+    name: Build & Test
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v4
-      - name: Install dependencies
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install Protobuf Compiler
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - name: Build
-        run: cargo build --verbose
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --verbose
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      # Build is implicitly handled by cargo test
       - name: Run tests
         run: cargo test --verbose

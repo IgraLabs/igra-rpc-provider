@@ -40,7 +40,7 @@ pub async fn handle_rpc(
                 .params
                 .get(0)
                 .and_then(|v| v.as_str())
-                .map(|s| s.len() / 2 - 1) // Rough estimate: hex string / 2 - 1 for 0x
+                .map(|s| (s.len() / 2).saturating_sub(1)) // Rough estimate: hex string / 2 - 1 for 0x
                 .unwrap_or(0);
 
             info!(
@@ -139,7 +139,7 @@ mod tests {
         assert_eq!(error_json["error"]["code"], json!(-32002));
         assert!(error_json["error"]["message"]
             .as_str()
-            .unwrap()
+            .expect("Error message should be a string")
             .contains(&method));
     }
 

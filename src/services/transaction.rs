@@ -38,8 +38,8 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
     tokio::spawn(async move {
         info!("TX_PROCESSOR: Background worker started");
 
-        let mut processed_count = 0;
-        let mut error_count = 0;
+        let mut processed_count: u16 = 0;
+        let mut error_count: u16 = 0;
 
         // Process transactions one at a time
         while let Some(tx_request) = transaction_receiver.recv().await {
@@ -89,14 +89,14 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
             let response = match process_wallet_result {
                 Ok(_) => {
                     let duration = start.elapsed();
-                    processed_count += 1;
+                    processed_count = processed_count.saturating_add(1);
                     info!("TX_PROCESSOR [id={}, hash={}]: Transaction processed successfully, time={:?}, payload_size={}, total_success={}, total_errors={}",
                         id_str, tx_hash_str, duration, tx_request.tx_bytes.len(), processed_count, error_count);
                     Ok(())
                 }
                 Err(err) => {
                     let duration = start.elapsed();
-                    error_count += 1;
+                    error_count = error_count.saturating_add(1);
                     error!("TX_PROCESSOR [id={}, hash={}]: Transaction failed: {}, time={:?}, payload_size={}, total_success={}, total_errors={}",
                         id_str, tx_hash_str, err, duration, tx_request.tx_bytes.len(), processed_count, error_count);
                     Err(err)
@@ -148,7 +148,7 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
         return error_json;
     }
 
-    let tx_bytes = tx_bytes_opt.unwrap();
+    let tx_bytes = tx_bytes_opt.expect("tx_bytes_opt should be Some after successful validation");
 
     // Log full bytes
     let full_bytes = format!("0x{}", hex::encode(&tx_bytes));
@@ -197,7 +197,10 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
         );
     }
 
-    let response = response_receiver.recv().await.unwrap(); // unwrap is safe, nobody ever closes the channel
+    let response = response_receiver
+        .recv()
+        .await
+        .expect("Failed to receive response from transaction processor");
 
     if let Err(e) = response {
         return json!({
@@ -340,15 +343,24 @@ pub async fn process_wallet_call(
         id_str, tx_hash_str
     );
     let payload_result = prepare_payload(tx_bytes);
-    if let Err(err) = payload_result {
-        let error_msg = format!("Failed to prepare payload: {}", err);
+    if payload_result.is_err() {
+        // For logging the error:
         error!(
-            "WALLET_CALL [id={}, hash={}]: {}",
-            id_str, tx_hash_str, error_msg
+            "WALLET_CALL [id={}]: Failed to prepare payload: {:?}",
+            id_str,
+            payload_result
+                .as_ref()
+                .expect_err("Error was expected for logging after is_err check")
         );
-        return Err(error_msg);
+
+        // For returning the error:
+        return Err(format!(
+            "Failed to prepare payload: {:?}",
+            payload_result.expect_err("Error was expected for return after is_err check")
+        ));
     }
-    let payload = payload_result.unwrap();
+    let payload = payload_result
+        .expect("payload_result should be Ok after successful preparation and error check");
 
     // Log full compressed payload
     let full_compressed_payload = format!("0x{}", hex::encode(&payload));
@@ -420,10 +432,22 @@ pub fn prepare_payload(tx_bytes: &[u8]) -> Result<Vec<u8>, Box<dyn Error + Sync 
     zlib_encoder.write_all(tx_bytes)?;
     let zipped_payload = zlib_encoder.finish()?;
 
-    // Construct the payload buffer with the required header
-    let mut payload_buffer = BytesMut::with_capacity(3 + zipped_payload.len());
-    payload_buffer.extend_from_slice(&[0x97, 0xB1]);
-    payload_buffer.extend_from_slice(&[0xA2]);
+    // Fixed header
+    const HEADER: [u8; 3] = [0x97, 0xB1, 0xA2];
+
+    // Use checked_add to prevent potential overflow
+    let capacity = HEADER
+        .len()
+        .checked_add(zipped_payload.len())
+        .ok_or_else(|| {
+            Box::<dyn Error + Sync + Send>::from(
+                "Payload capacity overflow when calculating buffer size",
+            )
+        })?;
+
+    let mut payload_buffer = BytesMut::with_capacity(capacity);
+    payload_buffer.extend_from_slice(&HEADER[0..2]); // [0x97, 0xB1]
+    payload_buffer.extend_from_slice(&HEADER[2..3]); // [0xA2]
     payload_buffer.extend_from_slice(&zipped_payload);
 
     Ok(payload_buffer.to_vec())
