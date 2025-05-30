@@ -2,40 +2,46 @@ name: Dependency security audit
 
 on:
   push:
-    paths:
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
+    branches: [main]
+  pull_request:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
+
 
 jobs:
   security_audit:
     timeout-minutes: 10
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, igra-rpc-provider]
     permissions:
       contents: read
       checks: write
     steps:
-      - name: Check out
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Cache audit-check build
-        id: cache-audit-check
+      - name: Setup Rust environment
+        run: |
+          source ~/.cargo/env
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
+          echo "RUSTUP_HOME=$HOME/.rustup" >> $GITHUB_ENV
+          echo "Using rustc: $(rustc +stable --version)"
+
+      - name: Cache cargo dependencies
         uses: actions/cache@v4
-        continue-on-error: false
         with:
           path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git
+            target-security_audit
+          key: ${{ runner.os }}-audit-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-audit-${{ hashFiles('**/Cargo.lock') }}-
+            ${{ runner.os }}-audit-
 
-      - name: Run audit-check action
+      - name: Run security audit
         run: |
-          which cargo-deny || cargo install cargo-deny
-          cargo deny check
+          export CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/target-${GITHUB_JOB}"
+          cargo +stable deny check

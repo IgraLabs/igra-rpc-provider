@@ -1,37 +1,49 @@
-name: Build and test code
+name: Build and Test
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
   pull_request:
-    branches: [ "main" ]
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
 
 jobs:
-  build_and_test:
-    name: Build & Test
-    runs-on: ubuntu-latest
+  build-and-test:
+    runs-on: [self-hosted, igra-rpc-provider]
     steps:
-      - name: Checkout source code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Protobuf Compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Setup Rust environment
+        run: |
+          source ~/.cargo/env
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
+          echo "RUSTUP_HOME=$HOME/.rustup" >> $GITHUB_ENV
+          echo "Using rustc: $(rustc +stable --version)"
 
-      - name: Install Rust stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git
+            target-build-and-test
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
+            ${{ runner.os }}-cargo-
 
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: |
+          export CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/target-${GITHUB_JOB}"
+          export CARGO_BUILD_JOBS=$(nproc)
+          cargo +stable build --release --verbose
 
       - name: Run tests
-        run: cargo test --verbose
-
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
-
-      # Build is implicitly handled by cargo test
-      - name: Run tests
-        run: cargo test --verbose
+        run: |
+          export CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/target-${GITHUB_JOB}"
+          export CARGO_TEST_THREADS=$(nproc)
+          cargo +stable test --release --verbose
