@@ -5,6 +5,10 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[allow(dead_code)]
 pub enum AppError {
+    /// Error indicates a failure in loading or parsing configuration.
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
+
     /// Error indicates an invalid L2 transaction format.
     #[error("Invalid L2 transaction format")]
     InvalidTransactionFormat,
@@ -20,6 +24,14 @@ pub enum AppError {
     /// Error indicates that the requested RPC method is not allowed.
     #[error("RPC method not allowed")]
     MethodNotAllowed(String),
+
+    /// Error indicates that the data for an IGRA payload is invalid.
+    #[error("Invalid IGRA payload data: {0}")]
+    InvalidPayload(String),
+
+    /// Error indicates a failure during payload serialization.
+    #[error("Payload serialization error: {0}")]
+    SerializationError(String),
 }
 
 impl AppError {
@@ -32,6 +44,7 @@ impl AppError {
     /// A `serde_json::Value` object representing the JSON-RPC error response.
     pub fn to_json_rpc_error(&self, id: Value) -> Value {
         let (code, message) = match self {
+            AppError::ConfigError(s) => (-32000, format!("Configuration error: {}", s)),
             AppError::InvalidTransactionFormat => {
                 (-32001, "Invalid L2 transaction format".to_string())
             }
@@ -39,6 +52,12 @@ impl AppError {
             AppError::WalletCallError => (-32005, "KASPA Wallet call failed".to_string()),
             AppError::MethodNotAllowed(method) => {
                 (-32002, format!("RPC method not allowed: {}", method))
+            }
+            AppError::InvalidPayload(reason) => {
+                (-32003, format!("Invalid IGRA payload: {}", reason))
+            }
+            AppError::SerializationError(reason) => {
+                (-32004, format!("Payload serialization error: {}", reason))
             }
         };
 

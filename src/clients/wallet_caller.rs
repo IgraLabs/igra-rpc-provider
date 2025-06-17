@@ -1,17 +1,16 @@
 use crate::config::WalletConfig;
-use hex;
 use kaswallet_proto::kaswallet_proto::wallet_client::WalletClient;
 use kaswallet_proto::kaswallet_proto::{NewAddressRequest, SendRequest, TransactionDescription};
 use std::env;
 use std::error::Error;
 use tokio::sync::Mutex;
-use tonic::transport::Channel;
 use tracing::info;
 
 const PASSWORD_ENV_VAR: &str = "KASWALLET_PASSWORD";
 
+/// Implementation of wallet caller for interacting with KASPA wallet daemon.
 pub struct WalletCaller {
-    wallet_daemon_client: Mutex<WalletClient<Channel>>,
+    wallet_daemon_client: Mutex<WalletClient<tonic::transport::Channel>>,
     to_address: String,
     password: String,
 }

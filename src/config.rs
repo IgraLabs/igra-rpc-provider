@@ -1,3 +1,4 @@
+use crate::error::AppError;
 use config::{Config, File};
 use serde::Deserialize;
 use std::env;
@@ -11,13 +12,13 @@ pub struct AppConfig {
     pub security: SecurityConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct ElConfig {
     pub url: String,
 }
@@ -28,7 +29,7 @@ pub struct WalletConfig {
     pub to_address: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct SecurityConfig {
     #[serde(default = "default_enable_whitelist")]
     pub enable_whitelist: bool,
@@ -39,8 +40,7 @@ fn default_enable_whitelist() -> bool {
 }
 
 impl AppConfig {
-    pub fn load() -> Self {
-        // Create a mapping of environment variables to config paths
+    pub fn load() -> Result<Self, AppError> {
         let env_mappings = [
             ("SERVER_HOST", "server.host"),
             ("SERVER_PORT", "server.port"),
@@ -50,26 +50,24 @@ impl AppConfig {
             ("SECURITY_ENABLE_WHITELIST", "security.enable_whitelist"),
         ];
 
-        // Load base config from file
         let mut builder = Config::builder().add_source(File::with_name("config").required(true));
 
-        // Apply environment variable overrides
         for (env_var, config_path) in env_mappings {
             if let Ok(value) = env::var(env_var) {
                 debug!("Overriding {} with value: {}", config_path, &value);
                 builder = builder
                     .set_override(config_path, value)
-                    .expect("Failed to set config override from env var");
+                    .map_err(|e| AppError::ConfigError(e.to_string()))?;
             }
         }
 
         let config = builder
             .build()
-            .unwrap_or_else(|err| panic!("Failed to load configuration: {}", err))
+            .map_err(|e| AppError::ConfigError(e.to_string()))?
             .try_deserialize()
-            .unwrap_or_else(|err| panic!("Failed to deserialize configuration: {}", err));
+            .map_err(|e| AppError::ConfigError(e.to_string()))?;
 
         debug!("Loaded config: {:?}", config);
-        config
+        Ok(config)
     }
 }

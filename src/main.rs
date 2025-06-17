@@ -9,7 +9,8 @@ use crate::clients::wallet_caller::WalletCaller;
 use axum::{routing::post, Router};
 use config::AppConfig;
 use services::transaction::{start_transaction_processor, TransactionRequest};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::process;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
@@ -28,17 +29,23 @@ async fn main() {
     setup_logging();
 
     // Load the application configuration
-    let config = AppConfig::load();
+    let config = match AppConfig::load() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("Failed to load configuration: {}", e);
+            process::exit(1);
+        }
+    };
 
     // Parse and create a socket address from the configuration
-    let addr = SocketAddr::from((
-        config
-            .server
-            .host
-            .parse::<std::net::IpAddr>()
-            .expect("Invalid IP address for server.host in configuration"),
-        config.server.port,
-    ));
+    let ip_addr: IpAddr = match config.server.host.parse() {
+        Ok(ip) => ip,
+        Err(_) => {
+            eprintln!("Invalid IP address for server.host in configuration");
+            process::exit(1);
+        }
+    };
+    let addr = SocketAddr::from((ip_addr, config.server.port));
 
     debug!(?config, "Config loaded");
     info!("IGRA RPC PROVIDER STARTING");
@@ -74,16 +81,21 @@ async fn main() {
     info!("Router configured, starting server...");
 
     // Bind the listener to the specified address
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .expect("Failed to bind to address");
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!("Failed to bind to address {}: {}", addr, e);
+            process::exit(1);
+        }
+    };
 
     info!("Server started, ready to accept connections");
 
     // Start the server using the Axum framework
-    axum::serve(listener, app.into_make_service())
-        .await
-        .expect("Server failed");
+    if let Err(e) = axum::serve(listener, app.into_make_service()).await {
+        eprintln!("Server failed: {}", e);
+        process::exit(1);
+    }
 }
 
 /// Sets up comprehensive logging
