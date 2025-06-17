@@ -1,19 +1,17 @@
 use crate::config::AppConfig;
 use crate::error::AppError;
-use crate::types::rpc::RpcRequest;
+use crate::types::rpc::{IgraPayload, RpcRequest, TxTypeId};
 use crate::AppState;
-use bytes::BytesMut;
 use ethers::types::{Transaction, H256};
 use ethers::utils::{keccak256, rlp};
-use flate2::write::ZlibEncoder;
-use flate2::Compression;
 use serde_json::{json, Value};
 use std::error::Error;
-use std::io::Write;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+const VERSION: u8 = 0x9;
 
 // Structure to represent a transaction request that needs to be processed sequentially
 pub struct TransactionRequest {
@@ -148,7 +146,20 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
         return error_json;
     }
 
-    let tx_bytes = tx_bytes_opt.expect("tx_bytes_opt should be Some after successful validation");
+    let tx_bytes = match tx_bytes_opt {
+        Some(bytes) => bytes,
+        None => {
+            // This case should theoretically not be reached if validation passes
+            // but we handle it gracefully to avoid a panic.
+            let err_msg = "Transaction validation passed but no bytes were returned";
+            error!("TX [id={}]: {}", id, err_msg);
+            return json!({
+                "jsonrpc": "2.0",
+                "error": { "code": -32000, "message": err_msg },
+                "id": id_value
+            });
+        }
+    };
 
     // Log full bytes
     let full_bytes = format!("0x{}", hex::encode(&tx_bytes));
@@ -327,51 +338,51 @@ pub async fn process_wallet_call(
     id: Value,
     app_state: Arc<AppState>,
 ) -> Result<Value, String> {
-    let id_str = id.to_string();
-    let tx_hash: H256 = compute_transaction_hash(tx_bytes);
+    let id_str = if id.is_null() {
+        "null".to_string()
+    } else {
+        id.to_string()
+    };
+
+    // For now, we'll use a mock nonce. In the future, this will be the result of mining.
+    let nonce = [0u8, 0u8, 0u8, 1u8];
+
+    // Construct the IgraPayload
+    let igra_payload = IgraPayload {
+        version: VERSION,
+        tx_type_id: TxTypeId::UnzippedPayload, // later we will support other types
+        l2_data: tx_bytes.to_vec(),
+        nonce,
+    };
+
+    // Serialize the payload
+    let final_payload_bytes = match serialize_payload(&igra_payload) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            let error_message = format!("Failed to serialize payload: {}", e);
+            error!(
+                "TX_PROCESSOR [id={}]: Serialization failed: {}",
+                id_str, error_message
+            );
+            return Err(error_message);
+        }
+    };
+
+    // Prepare payload for Kaspa wallet (e.g., zipping)
+    let wallet_payload_bytes = match prepare_payload(&final_payload_bytes) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            let error_message = format!("Failed to prepare payload: {}", e);
+            error!(
+                "TX_PROCESSOR [id={}]: Payload preparation failed: {}",
+                id_str, error_message
+            );
+            return Err(error_message);
+        }
+    };
+
+    let tx_hash = compute_transaction_hash(&wallet_payload_bytes);
     let tx_hash_str = format!("{:#x}", tx_hash);
-
-    // Log full payload
-    let full_payload = format!("0x{}", hex::encode(tx_bytes));
-
-    debug!("WALLET_CALL [id={}, hash={}]: Processing transaction with wallet, tx_bytes_len={}, payload={}",
-        id_str, tx_hash_str, tx_bytes.len(), full_payload);
-
-    // Prepare the payload for wallet call
-    debug!(
-        "WALLET_CALL [id={}, hash={}]: Preparing payload",
-        id_str, tx_hash_str
-    );
-    let payload_result = prepare_payload(tx_bytes);
-    if payload_result.is_err() {
-        // For logging the error:
-        error!(
-            "WALLET_CALL [id={}]: Failed to prepare payload: {:?}",
-            id_str,
-            payload_result
-                .as_ref()
-                .expect_err("Error was expected for logging after is_err check")
-        );
-
-        // For returning the error:
-        return Err(format!(
-            "Failed to prepare payload: {:?}",
-            payload_result.expect_err("Error was expected for return after is_err check")
-        ));
-    }
-    let payload = payload_result
-        .expect("payload_result should be Ok after successful preparation and error check");
-
-    // Log full compressed payload
-    let full_compressed_payload = format!("0x{}", hex::encode(&payload));
-
-    debug!(
-        "WALLET_CALL [id={}, hash={}]: Payload prepared successfully, size={} bytes, payload={}",
-        id_str,
-        tx_hash_str,
-        payload.len(),
-        full_compressed_payload
-    );
 
     // Call the KASPA Wallet for sending the transaction to the Base Layer
     info!(
@@ -379,9 +390,8 @@ pub async fn process_wallet_call(
         id_str,
         tx_hash_str,
         config.wallet.wallet_daemon_uri,
-        payload.len()
+        wallet_payload_bytes.len()
     );
-    let start = std::time::Instant::now();
 
     let wallet_caller = app_state.wallet_caller.clone();
 
@@ -390,15 +400,19 @@ pub async fn process_wallet_call(
         "WALLET_CALL [id={}, hash={}]: Sending transaction to wallet, payload_size={}",
         id_str,
         tx_hash_str,
-        payload.len()
+        wallet_payload_bytes.len()
     );
     let send_start = std::time::Instant::now();
 
     // Capture payload size before moving it
-    let payload_size = payload.len();
+    let payload_size = wallet_payload_bytes.len();
 
     if let Err(err) = wallet_caller
-        .send_transaction(payload, Some(id_str.clone()), Some(tx_hash_str.clone()))
+        .send_transaction(
+            wallet_payload_bytes,
+            Some(id_str.clone()),
+            Some(tx_hash_str.clone()),
+        )
         .await
     {
         let error_msg = format!("KASPA Wallet call failed: {}", err);
@@ -411,10 +425,9 @@ pub async fn process_wallet_call(
     }
 
     let send_time = send_start.elapsed();
-    let total_time = start.elapsed();
 
-    info!("WALLET_CALL [id={}, hash={}]: Transaction accepted by wallet, payload_size={}, send_time={:?}, total_time={:?}",
-        id_str, tx_hash_str, payload_size, send_time, total_time);
+    info!("WALLET_CALL [id={}, hash={}]: Transaction accepted by wallet, payload_size={}, send_time={:?}",
+        id_str, tx_hash_str, payload_size, send_time);
 
     // Create success response with hash
     let response = json!({
@@ -427,28 +440,86 @@ pub async fn process_wallet_call(
 }
 
 pub fn prepare_payload(tx_bytes: &[u8]) -> Result<Vec<u8>, Box<dyn Error + Sync + Send>> {
-    // Compress the transaction bytes using zlib
-    let mut zlib_encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-    zlib_encoder.write_all(tx_bytes)?;
-    let zipped_payload = zlib_encoder.finish()?;
+    // For now, we just pass the bytes through without zipping.
+    // The previous implementation of zipping and adding a header is now incorrect
+    // because the new `serialize_payload` function handles the header.
+    // Zipping logic can be re-introduced here if needed for specific TxTypeIds.
+    Ok(tx_bytes.to_vec())
+}
 
-    // Fixed header
-    const HEADER: [u8; 3] = [0x97, 0xB1, 0xA2];
+/// Serializes an `IgraPayload` into a byte vector according to the new format.
+///
+/// The format is:
+/// - `version` (4 bits) + `tx_type_id` (4 bits) in one byte
+/// - `l2_data` (variable length)
+/// - `nonce` (4 bytes)
+pub fn serialize_payload(payload: &IgraPayload) -> Result<Vec<u8>, AppError> {
+    // Validate payload fields before serialization
+    if payload.l2_data.is_empty() {
+        return Err(AppError::SerializationError(
+            "l2_data cannot be empty".to_string(),
+        ));
+    }
 
-    // Use checked_add to prevent potential overflow
-    let capacity = HEADER
-        .len()
-        .checked_add(zipped_payload.len())
-        .ok_or_else(|| {
-            Box::<dyn Error + Sync + Send>::from(
-                "Payload capacity overflow when calculating buffer size",
-            )
-        })?;
+    if payload.version > 0x0F {
+        return Err(AppError::SerializationError(format!(
+            "Version must be a 4-bit value, but got {:#x}",
+            payload.version
+        )));
+    }
 
-    let mut payload_buffer = BytesMut::with_capacity(capacity);
-    payload_buffer.extend_from_slice(&HEADER[0..2]); // [0x97, 0xB1]
-    payload_buffer.extend_from_slice(&HEADER[2..3]); // [0xA2]
-    payload_buffer.extend_from_slice(&zipped_payload);
+    let mut buffer = Vec::new();
 
-    Ok(payload_buffer.to_vec())
+    // 1. Version (4 bits) and TxTypeId (4 bits)
+    let version_and_type_id = (payload.version << 4) | (payload.tx_type_id as u8);
+    buffer.push(version_and_type_id);
+
+    // 2. L2 Data (variable length)
+    buffer.extend_from_slice(&payload.l2_data);
+
+    // 3. Nonce (4 bytes)
+    buffer.extend_from_slice(&payload.nonce);
+
+    Ok(buffer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_serialize_payload_success() {
+        let payload = IgraPayload {
+            version: 0x9,
+            tx_type_id: TxTypeId::Entry,
+            l2_data: vec![1, 2, 3, 4],
+            nonce: [5, 6, 7, 8],
+        };
+
+        let result =
+            serialize_payload(&payload).expect("Serialization of a valid payload should not fail");
+
+        assert_eq!(result.len(), 1 + 4 + 4);
+        assert_eq!(result[0], 0x92);
+        assert_eq!(result[1..5], [1, 2, 3, 4]);
+        assert_eq!(result[5..9], [5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn test_serialize_payload_empty_l2_data() {
+        let payload = IgraPayload {
+            version: 0x9,
+            tx_type_id: TxTypeId::Entry,
+            l2_data: vec![],
+            nonce: [0; 4],
+        };
+
+        let result = serialize_payload(&payload);
+        assert!(result.is_err());
+        if let Err(AppError::SerializationError(msg)) = result {
+            assert_eq!(msg, "l2_data cannot be empty");
+        } else {
+            panic!("Expected a SerializationError, but got {:?}", result)
+        }
+    }
 }

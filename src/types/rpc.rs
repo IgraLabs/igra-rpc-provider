@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const NONCE_SIZE: usize = 4;
+
 /// Represents a JSON-RPC request.
 ///
 /// A JSON-RPC request consists of the `jsonrpc` version, the method being
@@ -17,17 +19,32 @@ pub struct RpcRequest {
     pub id: Value,
 }
 
-/// Represents a JSON-RPC response.
+/// Represents the type of an IGRA L2 transaction.
 ///
-/// A JSON-RPC response contains the `jsonrpc` version, the result of the
-/// requested operation (`result`), and the unique ID of the corresponding
-/// request (`id`).
-#[derive(Debug, Serialize)]
-pub struct RpcResponse {
-    /// The JSON-RPC protocol version, typically "2.0".
-    pub jsonrpc: String,
-    /// The result of the operation as a JSON value.
-    pub result: Value,
-    /// The identifier matching the corresponding request.
-    pub id: Value,
+/// This enum is used in the L1 payload to identify the kind of L2 data being transmitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+#[allow(dead_code)] // Some variants not yet implemented
+pub enum TxTypeId {
+    /// L2 Start transaction (0x00)
+    L2Start = 0x00,
+    /// Entry transaction (0x02)
+    Entry = 0x02,
+    /// 1-to-1 Unzipped Payload transaction (0x04)
+    UnzippedPayload = 0x04,
+    /// 1-to-1 Zipped Payload transaction (0x05)
+    ZippedPayload = 0x05,
+}
+
+/// Represents the new IGRA L1 transaction payload format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgraPayload {
+    /// The payload format version, fixed at `0x9`.
+    pub version: u8,
+    /// The type of L2 transaction.
+    pub tx_type_id: TxTypeId,
+    /// The L2-specific data.
+    pub l2_data: Vec<u8>,
+    /// The nonce used for mining a valid transaction ID.
+    pub nonce: [u8; NONCE_SIZE],
 }
