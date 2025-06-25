@@ -26,6 +26,12 @@ ignore = [
     "RUSTSEC-2024-0384", # instant is unmaintained
     "RUSTSEC-2025-0010", # ring 0.16 unmaintained
     "RUSTSEC-2025-0009", # ring 0.16 AES vulnerability
+    "RUSTSEC-2021-0145", # atty potential unaligned read (Windows only, not critical for our use case)
+    "RUSTSEC-2024-0375", # atty unmaintained (indirect dependency, will be phased out)
+    "RUSTSEC-2024-0388", # derivative unmaintained (indirect dependency from kaspa crates)
+    "RUSTSEC-2024-0407", # linkme unsound (should upgrade when possible)
+    "RUSTSEC-2024-0370", # proc-macro-error unmaintained (indirect dependency)
+    "RUSTSEC-2024-0436", # paste is unmaintained (project archived, but widely used and stable)
 ]
 yanked = "deny"
 
@@ -48,6 +54,8 @@ allow = [
     "Unlicense",
     "MPL-2.0",
     "CC0-1.0",
+    "LGPL-3.0", # Allow LGPL for malachite crates (math library dependencies)
+    "CDLA-Permissive-2.0", # Community Data License Agreement - needed for webpki-roots
 ]
 confidence-threshold = 0.8
 unused-allowed-license = "allow"
@@ -64,6 +72,17 @@ license-files = [
     { path = "LICENSE", hash = 0xbd0eed23 }
 ]
 
+# Allow LGPL license specifically for malachite math libraries
+[[licenses.clarify]]
+name = "malachite-base"
+expression = "LGPL-3.0-only"
+license-files = []
+
+[[licenses.clarify]]
+name = "malachite-nz"
+expression = "LGPL-3.0-only"
+license-files = []
+
 [bans]
 allow-wildcard-paths = true
 multiple-versions = "warn"
@@ -79,6 +98,7 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-git = [
     "https://github.com/IgraLabs/kaswallet-proto.git",
+    "https://github.com/IgraLabs/rusty-kaspa.git",
 ]
 
 [sources.allow-org]

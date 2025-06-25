@@ -1,5 +1,6 @@
 use crate::config::AppConfig;
 use crate::error::AppError;
+use crate::services::mining::TransactionMiner;
 use crate::types::rpc::{IgraPayload, RpcRequest, TxTypeId};
 use crate::AppState;
 use ethers::types::{Transaction, H256};
@@ -60,7 +61,7 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
             let full_payload = format!("0x{}", hex::encode(&tx_request.tx_bytes));
 
             info!(
-                "TX_PROCESSOR [id={}, hash={}]: Processing transaction, bytes={}, payload={}",
+                "TX_PROCESSOR [id={}, hash={}]: Processing transaction, payload_size={}, payload={}",
                 id_str,
                 tx_hash_str,
                 tx_request.tx_bytes.len(),
@@ -88,8 +89,8 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
                 Ok(_) => {
                     let duration = start.elapsed();
                     processed_count = processed_count.saturating_add(1);
-                    info!("TX_PROCESSOR [id={}, hash={}]: Transaction processed successfully, time={:?}, payload_size={}, total_success={}, total_errors={}",
-                        id_str, tx_hash_str, duration, tx_request.tx_bytes.len(), processed_count, error_count);
+                    info!("TX_PROCESSOR [id={}, hash={}]: Transaction processed successfully, time={:?}, payload_size={}, payload={}, total_success={}, total_errors={}",
+                        id_str, tx_hash_str, duration, tx_request.tx_bytes.len(), full_payload, processed_count, error_count);
                     Ok(())
                 }
                 Err(err) => {
@@ -381,7 +382,7 @@ pub async fn process_wallet_call(
         }
     };
 
-    let tx_hash = compute_transaction_hash(&wallet_payload_bytes);
+    let tx_hash = compute_transaction_hash(&igra_payload.l2_data);
     let tx_hash_str = format!("{:#x}", tx_hash);
 
     // Call the KASPA Wallet for sending the transaction to the Base Layer
@@ -407,11 +408,16 @@ pub async fn process_wallet_call(
     // Capture payload size before moving it
     let payload_size = wallet_payload_bytes.len();
 
+    let miner = TransactionMiner::new(config.mining.clone());
+    debug!("WALLET_CALL [id={}]: Created transaction miner with config: required_prefix=0x{}, timeout={}s",
+        id_str, hex::encode(&config.mining.required_prefix), config.mining.timeout_seconds);
+
     if let Err(err) = wallet_caller
-        .send_transaction(
+        .mine_and_send_transaction(
             wallet_payload_bytes,
             Some(id_str.clone()),
             Some(tx_hash_str.clone()),
+            &miner,
         )
         .await
     {
