@@ -56,8 +56,8 @@ pub async fn handle_rpc(
             // Extract result or error for logging
             if let Some(result_value) = result.get("result") {
                 let tx_hash = result_value.as_str().unwrap_or("unknown");
-                info!("RPC RESPONSE [id={}, hash={}]: Transaction processed successfully, time={:?}, payload_size={} bytes",
-                    id, tx_hash, duration, payload_size);
+                info!("RPC RESPONSE [id={}, hash={}]: Transaction processed successfully, time={:?}, payload_size={} bytes, request_payload={}",
+                    id, tx_hash, duration, payload_size, full_params);
             } else if let Some(error) = result.get("error") {
                 error!("RPC RESPONSE [id={}]: Transaction processing failed, error={}, time={:?}, payload={}",
                     id, error, duration, full_params);
@@ -99,8 +99,9 @@ pub async fn handle_rpc(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppConfig;
-    use crate::config::{ElConfig, SecurityConfig, ServerConfig, WalletConfig};
+    use crate::config::{
+        AppConfig, ElConfig, MiningConfig, SecurityConfig, ServerConfig, WalletConfig,
+    };
     use serde_json::json;
 
     // Helper to create a default test config with a fake EL URL
@@ -118,6 +119,7 @@ mod tests {
                 to_address: "".to_string(),
             },
             security: SecurityConfig { enable_whitelist },
+            mining: MiningConfig::default(),
         }
     }
 

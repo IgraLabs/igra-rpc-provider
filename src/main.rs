@@ -6,6 +6,7 @@ mod services;
 mod types;
 
 use crate::clients::wallet_caller::WalletCaller;
+use crate::error::AppError;
 use axum::{routing::post, Router};
 use config::AppConfig;
 use services::transaction::{start_transaction_processor, TransactionRequest};
@@ -24,7 +25,7 @@ pub struct AppState {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), AppError> {
     // Initialize enhanced tracing for logging
     setup_logging();
 
@@ -60,7 +61,7 @@ async fn main() {
     let wallet_caller_result = WalletCaller::new(config.wallet.clone()).await;
     if let Err(err) = wallet_caller_result {
         error!("Failed to create WalletCaller: {}", err);
-        return;
+        return Ok(());
     }
     let wallet_caller = Arc::new(
         wallet_caller_result.expect("WalletCaller should have been successfully initialized"),
@@ -96,6 +97,8 @@ async fn main() {
         eprintln!("Server failed: {}", e);
         process::exit(1);
     }
+
+    Ok(())
 }
 
 /// Sets up comprehensive logging
