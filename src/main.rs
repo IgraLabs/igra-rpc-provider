@@ -1,28 +1,14 @@
-mod api;
-mod clients;
-mod config;
-mod error;
-mod services;
-mod types;
-
-use crate::clients::wallet_caller::WalletCaller;
-use crate::error::AppError;
+// Import everything from the library instead
 use axum::{routing::post, Router};
-use config::AppConfig;
-use services::transaction::{start_transaction_processor, TransactionRequest};
+use igra_rpc_provider::{
+    api, clients::wallet_caller::WalletCaller, config::AppConfig, error::AppError,
+    services::transaction::start_transaction_processor, AppState,
+};
 use std::net::{IpAddr, SocketAddr};
 use std::process;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-
-// Define a type for our shared state
-pub struct AppState {
-    pub config: AppConfig,
-    pub transaction_sender: mpsc::Sender<TransactionRequest>,
-    pub wallet_caller: Arc<WalletCaller>,
-}
 
 #[tokio::main]
 async fn main() -> Result<(), AppError> {

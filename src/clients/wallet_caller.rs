@@ -13,6 +13,44 @@ use tracing::{debug, error, info, instrument};
 
 const PASSWORD_ENV_VAR: &str = "KASWALLET_PASSWORD";
 
+/// Parameters for creating a transaction
+#[derive(Debug, Clone)]
+pub struct TransactionParams {
+    pub to_address: String,
+    pub amount: u64,
+    pub is_send_all: bool,
+    pub payload: Vec<u8>,
+    pub l2_transaction_hash: Option<String>,
+}
+
+impl TransactionParams {
+    /// Create transaction params for Entry transactions
+    pub fn entry_transaction(to_address: String, amount: u64, payload: Vec<u8>) -> Self {
+        Self {
+            to_address,
+            amount,
+            is_send_all: false,
+            payload,
+            l2_transaction_hash: None,
+        }
+    }
+
+    /// Create transaction params for existing RPC behavior (send all to default address)
+    pub fn send_all(
+        to_address: String,
+        payload: Vec<u8>,
+        transaction_hash: Option<String>,
+    ) -> Self {
+        Self {
+            to_address,
+            amount: 0,
+            is_send_all: true,
+            payload,
+            l2_transaction_hash: transaction_hash,
+        }
+    }
+}
+
 /// Implementation of wallet caller for interacting with KASPA wallet daemon.
 pub struct WalletCaller {
     wallet_daemon_client: Mutex<WalletClient<tonic::transport::Channel>>,
@@ -52,21 +90,24 @@ impl WalletCaller {
     }
 
     /// Mine and send transaction using the focused mining service
-    #[instrument(skip(self, payload, miner))]
+    #[instrument(skip(self, transaction_params, miner))]
     pub async fn mine_and_send_transaction(
         &self,
-        payload: Vec<u8>,
-        transaction_id: Option<String>,
-        transaction_hash: Option<String>,
+        transaction_params: TransactionParams,
         miner: &TransactionMiner,
     ) -> Result<String, WalletCallerError> {
         info!(
-            "Starting mine_and_send_transaction with focused mining service, payload size: {} bytes",
-            payload.len()
+            "Starting mine_and_send_transaction: to_address={}, amount={}, is_send_all={}, payload_size={} bytes",
+            &transaction_params.to_address,
+            transaction_params.amount,
+            transaction_params.is_send_all,
+            transaction_params.payload.len()
         );
 
         // Step 1: Create unsigned transactions
-        let mut unsigned_transactions = self.create_unsigned_transaction(payload).await?;
+        let mut unsigned_transactions = self
+            .create_unsigned_transaction(transaction_params.clone())
+            .await?;
 
         info!(
             "Created {} unsigned transactions, starting mining process",
@@ -98,7 +139,16 @@ impl WalletCaller {
 
         info!(
             "Mining completed: {} nonces in {:?}, hash rate: {:.2} H/s",
-            mining_stats.nonces_tried, mining_stats.duration, mining_stats.hashes_per_second
+            mining_stats.nonces_tried, mining_stats.duration, mining_stats.hashes_per_second,
+        );
+
+        info!(
+            "Mined transaction: igra_payload={} (to_address={}, amount={}, is_send_all={}, payload_size={} bytes)",
+            hex::encode(&mined_transaction.tx.payload),
+            &transaction_params.to_address,
+            transaction_params.amount,
+            transaction_params.is_send_all,
+            transaction_params.payload.len()
         );
 
         // Update wallet transaction with mined result
@@ -128,17 +178,22 @@ impl WalletCaller {
         Ok(last_tx_id.clone())
     }
 
+    /// Get the default to_address for this wallet caller
+    pub fn default_to_address(&self) -> &str {
+        &self.to_address
+    }
+
     /// Creates unsigned transactions using the wallet daemon
-    #[instrument(skip(self, payload))]
+    #[instrument(skip(self, transaction_params))]
     async fn create_unsigned_transaction(
         &self,
-        payload: Vec<u8>,
+        transaction_params: TransactionParams,
     ) -> Result<Vec<Vec<u8>>, WalletCallerError> {
         let transaction_description = Some(TransactionDescription {
-            to_address: self.to_address.clone(),
-            amount: 0,
-            is_send_all: true,
-            payload,
+            to_address: transaction_params.to_address.clone(),
+            amount: transaction_params.amount,
+            is_send_all: transaction_params.is_send_all,
+            payload: transaction_params.payload,
             from_addresses: vec![],
             utxos: vec![],
             use_existing_change_address: false,
@@ -156,8 +211,11 @@ impl WalletCaller {
 
         let unsigned_transactions = response.into_inner().unsigned_transactions;
         debug!(
-            "Created {} unsigned transactions",
-            unsigned_transactions.len()
+            "Created {} unsigned transactions with to_address={}, amount={}, is_send_all={}",
+            unsigned_transactions.len(),
+            transaction_params.to_address,
+            transaction_params.amount,
+            transaction_params.is_send_all
         );
 
         Ok(unsigned_transactions)

@@ -56,6 +56,7 @@ allow = [
     "CC0-1.0",
     "LGPL-3.0", # Allow LGPL for malachite crates (math library dependencies)
     "CDLA-Permissive-2.0", # Community Data License Agreement - needed for webpki-roots
+    "BSL-1.0", # Boost Software License 1.0 - OSI approved, needed for xxhash-rust via kaspa-wallet-core
 ]
 confidence-threshold = 0.8
 unused-allowed-license = "allow"

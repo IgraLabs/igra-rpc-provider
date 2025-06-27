@@ -1,3 +1,4 @@
+use crate::clients::wallet_caller::TransactionParams;
 use crate::config::AppConfig;
 use crate::error::AppError;
 use crate::services::mining::TransactionMiner;
@@ -12,7 +13,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-const VERSION: u8 = 0x9;
+/// The version of the IgraPayload format
+pub const VERSION: u8 = 0x9;
 
 // Structure to represent a transaction request that needs to be processed sequentially
 pub struct TransactionRequest {
@@ -339,12 +341,6 @@ pub async fn process_wallet_call(
     id: Value,
     app_state: Arc<AppState>,
 ) -> Result<Value, String> {
-    let id_str = if id.is_null() {
-        "null".to_string()
-    } else {
-        id.to_string()
-    };
-
     // For now, we'll use a mock nonce. In the future, this will be the result of mining.
     let nonce = [0u8, 0u8, 0u8, 1u8];
 
@@ -355,6 +351,8 @@ pub async fn process_wallet_call(
         l2_data: tx_bytes.to_vec(),
         nonce,
     };
+    let tx_hash = compute_transaction_hash(&igra_payload.l2_data);
+    let tx_hash_str = format!("{:#x}", tx_hash);
 
     // Serialize the payload
     let final_payload_bytes = match serialize_payload(&igra_payload) {
@@ -362,8 +360,8 @@ pub async fn process_wallet_call(
         Err(e) => {
             let error_message = format!("Failed to serialize payload: {}", e);
             error!(
-                "TX_PROCESSOR [id={}]: Serialization failed: {}",
-                id_str, error_message
+                "TX_PROCESSOR [hash={}]: Serialization failed: {}",
+                tx_hash_str, error_message
             );
             return Err(error_message);
         }
@@ -375,20 +373,16 @@ pub async fn process_wallet_call(
         Err(e) => {
             let error_message = format!("Failed to prepare payload: {}", e);
             error!(
-                "TX_PROCESSOR [id={}]: Payload preparation failed: {}",
-                id_str, error_message
+                "TX_PROCESSOR [hash={}]: Payload preparation failed: {}",
+                tx_hash_str, error_message
             );
             return Err(error_message);
         }
     };
 
-    let tx_hash = compute_transaction_hash(&igra_payload.l2_data);
-    let tx_hash_str = format!("{:#x}", tx_hash);
-
     // Call the KASPA Wallet for sending the transaction to the Base Layer
     info!(
-        "WALLET_CALL [id={}, hash={}]: Connecting to KASPA Wallet at {}, payload_size={}",
-        id_str,
+        "WALLET_CALL [hash={}]: Connecting to KASPA Wallet at {}, payload_size={}",
         tx_hash_str,
         config.wallet.wallet_daemon_uri,
         wallet_payload_bytes.len()
@@ -398,8 +392,7 @@ pub async fn process_wallet_call(
 
     // Actually send the transaction
     info!(
-        "WALLET_CALL [id={}, hash={}]: Sending transaction to wallet, payload_size={}",
-        id_str,
+        "WALLET_CALL [hash={}]: Sending transaction to wallet, payload_size={}",
         tx_hash_str,
         wallet_payload_bytes.len()
     );
@@ -409,31 +402,34 @@ pub async fn process_wallet_call(
     let payload_size = wallet_payload_bytes.len();
 
     let miner = TransactionMiner::new(config.mining.clone());
-    debug!("WALLET_CALL [id={}]: Created transaction miner with config: required_prefix=0x{}, timeout={}s",
-        id_str, hex::encode(&config.mining.required_prefix), config.mining.timeout_seconds);
+    debug!("WALLET_CALL [hash={}]: Created transaction miner with config: required_prefix=0x{}, timeout={}s",
+        tx_hash_str, hex::encode(&config.mining.required_prefix), config.mining.timeout_seconds);
+
+    let transaction_params = TransactionParams::send_all(
+        wallet_caller.default_to_address().to_string(),
+        wallet_payload_bytes,
+        Some(tx_hash_str.clone()),
+    );
 
     if let Err(err) = wallet_caller
-        .mine_and_send_transaction(
-            wallet_payload_bytes,
-            Some(id_str.clone()),
-            Some(tx_hash_str.clone()),
-            &miner,
-        )
+        .mine_and_send_transaction(transaction_params, &miner)
         .await
     {
         let error_msg = format!("KASPA Wallet call failed: {}", err);
         let duration = send_start.elapsed();
         error!(
-            "WALLET_CALL [id={}, hash={}]: Send failed: {}, time={:?}",
-            id_str, tx_hash_str, error_msg, duration
+            "WALLET_CALL [hash={}]: Send failed: {}, time={:?}",
+            tx_hash_str, error_msg, duration
         );
         return Err(error_msg);
     }
 
     let send_time = send_start.elapsed();
 
-    info!("WALLET_CALL [id={}, hash={}]: Transaction accepted by wallet, payload_size={}, send_time={:?}",
-        id_str, tx_hash_str, payload_size, send_time);
+    info!(
+        "WALLET_CALL [hash={}]: Transaction accepted by wallet, payload_size={}, send_time={:?}",
+        tx_hash_str, payload_size, send_time
+    );
 
     // Create success response with hash
     let response = json!({
