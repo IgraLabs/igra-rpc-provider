@@ -3,6 +3,7 @@
 //! Core library components for the IGRA RPC Provider
 
 use crate::clients::wallet_caller::WalletCaller;
+use crate::services::proxy::ProxyService;
 use crate::services::transaction::TransactionRequest;
 use config::AppConfig;
 use std::sync::Arc;
@@ -20,4 +21,5 @@ pub struct AppState {
     pub config: AppConfig,
     pub transaction_sender: mpsc::Sender<TransactionRequest>,
     pub wallet_caller: Arc<WalletCaller>,
+    pub proxy_service: ProxyService,
 }

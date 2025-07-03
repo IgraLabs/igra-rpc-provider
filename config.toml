@@ -12,6 +12,9 @@ to_address = "kaspadev:qpm06zv507sh59hjevsmkkgj9kv0q7a02wtnxt6l9qcvjk7dqtysy9kg4
 [security]
 enable_whitelist = true
 
+[gas]
+min_base_fee_gwei = 100
+
 [mining]
 # Required prefix for mined transaction IDs (default: [0x97, 0xb1])
 required_prefix = [0x97, 0xb1]

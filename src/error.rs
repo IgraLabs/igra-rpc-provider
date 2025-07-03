@@ -62,6 +62,14 @@ pub enum AppError {
     /// Error indicates a wallet operation failure.
     #[error("Wallet error: {0}")]
     WalletError(String),
+
+    /// Error indicates a JSON-RPC error.
+    #[error("JSON-RPC error: {0}")]
+    JsonRpcError(Value),
+
+    /// Error indicates an internal error.
+    #[error("Internal error: {0}")]
+    Internal(String),
 }
 
 // Add conversion from WalletError to AppError
@@ -129,6 +137,10 @@ impl AppError {
                 format!("Mining invalid transaction state: {}", reason),
             ),
             AppError::WalletError(reason) => (-32012, format!("Wallet error: {}", reason)),
+            AppError::JsonRpcError(json_error) => {
+                (-32000, format!("JSON-RPC error: {}", json_error))
+            }
+            AppError::Internal(reason) => (-32000, format!("Internal error: {}", reason)),
         };
 
         json!({

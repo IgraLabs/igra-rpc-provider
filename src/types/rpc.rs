@@ -48,3 +48,10 @@ pub struct IgraPayload {
     /// The nonce used for mining a valid transaction ID.
     pub nonce: [u8; NONCE_SIZE],
 }
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct JsonRpcResponse<T> {
+    pub jsonrpc: String,
+    pub id: Value,
+    pub result: T,
+}

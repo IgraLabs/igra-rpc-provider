@@ -1,8 +1,14 @@
 // Import everything from the library instead
 use axum::{routing::post, Router};
 use igra_rpc_provider::{
-    api, clients::wallet_caller::WalletCaller, config::AppConfig, error::AppError,
-    services::transaction::start_transaction_processor, AppState,
+    api,
+    clients::wallet_caller::WalletCaller,
+    config::AppConfig,
+    error::AppError,
+    services::{
+        gas_price::GasPriceService, proxy::ProxyService, transaction::start_transaction_processor,
+    },
+    AppState,
 };
 use std::net::{IpAddr, SocketAddr};
 use std::process;
@@ -53,11 +59,16 @@ async fn main() -> Result<(), AppError> {
         wallet_caller_result.expect("WalletCaller should have been successfully initialized"),
     );
 
+    // Create the new services
+    let gas_price_service = Arc::new(GasPriceService::new(config.gas.clone()));
+    let proxy_service = ProxyService::new(config.el.url.clone(), gas_price_service);
+
     // Set up the shared state
     let state = Arc::new(AppState {
         config,
         transaction_sender,
         wallet_caller,
+        proxy_service,
     });
 
     // Build the Axum router

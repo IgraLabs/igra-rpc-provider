@@ -1,6 +1,6 @@
 use crate::{
     error::AppError,
-    services::{proxy, transaction},
+    services::transaction,
     types::{rpc::RpcRequest, whitelist},
     AppState,
 };
@@ -68,12 +68,12 @@ pub async fn handle_rpc(
         // For all other methods, just forward to EL using the original logic
         _ => {
             info!(
-                "RPC REQUEST [id={}]: Forwarding method={} to execution layer at {}",
-                id, method, state.config.el.url
+                "RPC REQUEST [id={}]: Forwarding method={} to execution layer",
+                id, method
             );
 
             let start_time = std::time::Instant::now();
-            let result = proxy::forward_to_el(req, &state.config.el.url).await;
+            let result = state.proxy_service.forward_to_el(req).await;
             let duration = start_time.elapsed();
 
             // Extract result or error for logging
@@ -100,7 +100,7 @@ pub async fn handle_rpc(
 mod tests {
     use super::*;
     use crate::config::{
-        AppConfig, ElConfig, MiningConfig, SecurityConfig, ServerConfig, WalletConfig,
+        AppConfig, ElConfig, GasConfig, MiningConfig, SecurityConfig, ServerConfig, WalletConfig,
     };
     use serde_json::json;
 
@@ -120,6 +120,7 @@ mod tests {
             },
             security: SecurityConfig { enable_whitelist },
             mining: MiningConfig::default(),
+            gas: GasConfig::default(),
         }
     }
 
