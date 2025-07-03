@@ -2,11 +2,12 @@ use crate::error::AppError;
 use config::{Config, File};
 use serde::Deserialize;
 use std::env;
-use tracing::debug;
+use tracing::{debug, info};
 
 const DEFAULT_ENABLE_WHITELIST: bool = true;
 const DEFAULT_REQUIRED_PREFIX: &[u8] = &[0x97, 0xb1];
 const DEFAULT_TIMEOUT_SECONDS: u64 = 10;
+const DEFAULT_MIN_BASE_FEE_GWEI: u64 = 100;
 const HASH_SIZE: usize = 32;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -16,6 +17,8 @@ pub struct AppConfig {
     pub wallet: WalletConfig,
     pub security: SecurityConfig,
     pub mining: MiningConfig,
+    #[serde(default)]
+    pub gas: GasConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -47,6 +50,12 @@ pub struct MiningConfig {
     pub required_prefix: Vec<u8>,
     #[serde(default = "default_timeout_seconds")]
     pub timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GasConfig {
+    #[serde(default = "default_min_base_fee_gwei")]
+    pub min_base_fee_gwei: u64,
 }
 
 impl Default for MiningConfig {
@@ -88,6 +97,14 @@ impl MiningConfig {
     }
 }
 
+impl Default for GasConfig {
+    fn default() -> Self {
+        Self {
+            min_base_fee_gwei: default_min_base_fee_gwei(),
+        }
+    }
+}
+
 fn default_enable_whitelist() -> bool {
     DEFAULT_ENABLE_WHITELIST
 }
@@ -100,6 +117,10 @@ fn default_timeout_seconds() -> u64 {
     DEFAULT_TIMEOUT_SECONDS
 }
 
+fn default_min_base_fee_gwei() -> u64 {
+    DEFAULT_MIN_BASE_FEE_GWEI
+}
+
 impl AppConfig {
     pub fn load() -> Result<Self, AppError> {
         let env_mappings = [
@@ -109,8 +130,9 @@ impl AppConfig {
             ("WALLET_DAEMON_URI", "wallet.wallet_daemon_uri"),
             ("WALLET_TO_ADDRESS", "wallet.to_address"),
             ("SECURITY_ENABLE_WHITELIST", "security.enable_whitelist"),
-            ("MINING_required_prefix", "mining.required_prefix"),
+            ("MINING_REQUIRED_PREFIX", "mining.required_prefix"),
             ("MINING_TIMEOUT_SECONDS", "mining.timeout_seconds"),
+            ("GAS_MIN_BASE_FEE_GWEI", "gas.min_base_fee_gwei"),
         ];
 
         let mut builder = Config::builder().add_source(File::with_name("config").required(true));
@@ -133,7 +155,7 @@ impl AppConfig {
         // Validate mining configuration
         config.mining.validate()?;
 
-        debug!("Loaded config: {:?}", config);
+        info!("Loaded config: {:?}", config);
         Ok(config)
     }
 }

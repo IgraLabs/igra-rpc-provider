@@ -44,6 +44,8 @@ uuid = { version = "1.8.0", features = ["v4"] }
 mockito = "1.2"
 tokio-test = "0.4"
 tracing-test = "0.2"
+tokio = { version = "1.38.0", features = ["macros"] }
+wiremock = "0.6.0"
 
 [lints.rust]
 missing_docs = "allow"
