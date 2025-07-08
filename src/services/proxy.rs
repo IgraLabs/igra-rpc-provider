@@ -63,26 +63,14 @@ impl ProxyService {
         match send_rpc_request(&req_value, &self.el_url).await {
             Ok(response) => {
                 let duration = start.elapsed();
-                let mut response_body =
-                    serde_json::to_vec(&response).unwrap_or_else(|_| Vec::new());
+                let mut final_response = response;
 
-                // If the method is `eth_gasPrice`, process the response through our service.
+                // If the method is `eth_gasPrice`, floor the result in-place.
                 if method == "eth_gasPrice" {
                     info!("PROXY [id={}]: Intercepting eth_gasPrice response", id);
-                    match self
-                        .gas_price_service
-                        .floor_gas_price_response(&response_body)
-                    {
-                        Ok(modified_body) => response_body = modified_body,
-                        Err(e) => {
-                            error!("Failed to process gas price floor: {}", e);
-                        }
-                    }
+                    self.gas_price_service
+                        .floor_gas_price_value(&mut final_response);
                 }
-
-                // Deserialize the final (potentially modified) body to create the final response.
-                let final_response: Value = serde_json::from_slice(&response_body)
-                    .unwrap_or_else(|_| json!({"error": "failed to deserialize final response"}));
 
                 // Log different response types appropriately
                 if let Some(error) = final_response.get("error") {
