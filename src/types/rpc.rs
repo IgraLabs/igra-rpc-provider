@@ -1,3 +1,4 @@
+use ethers::types::U256;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -54,4 +55,17 @@ pub struct JsonRpcResponse<T> {
     pub jsonrpc: String,
     pub id: Value,
     pub result: T,
+}
+
+/// Represents an Ethereum block for parsing eth_getBlockByNumber responses.
+/// Contains only the fields we need for gas price calculations.
+#[derive(Serialize, Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Block {
+    /// The base fee per gas for this block (EIP-1559)
+    pub base_fee_per_gas: Option<U256>,
+    /// Block number (unused, optional)
+    pub number: Option<U256>,
+    /// Block hash (unused, optional)
+    pub hash: Option<String>,
 }

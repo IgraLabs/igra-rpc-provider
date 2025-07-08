@@ -1,10 +1,11 @@
 use crate::clients::wallet_caller::TransactionParams;
 use crate::config::AppConfig;
 use crate::error::AppError;
+use crate::services::gas_price::GasPriceService;
 use crate::services::mining::TransactionMiner;
 use crate::types::rpc::{IgraPayload, RpcRequest, TxTypeId};
 use crate::AppState;
-use ethers::types::{Transaction, H256};
+use ethers::types::{Transaction, H256, U256};
 use ethers::utils::{keccak256, rlp};
 use serde_json::{json, Value};
 use std::error::Error;
@@ -42,6 +43,9 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
         let mut processed_count: u16 = 0;
         let mut error_count: u16 = 0;
 
+        // Create GasPriceService for fee validation
+        let gas_price_service = GasPriceService::new(config.gas.clone());
+
         // Process transactions one at a time
         while let Some(tx_request) = transaction_receiver.recv().await {
             let tx_hash = compute_transaction_hash(&tx_request.tx_bytes);
@@ -72,6 +76,36 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
 
             let start = std::time::Instant::now();
 
+            // Calculate effective base fee for this processing cycle
+            let effective_base_fee = match gas_price_service
+                .get_effective_base_fee(&config.el.url)
+                .await
+            {
+                Ok(fee) => {
+                    info!(
+                        "TX_PROCESSOR [id={}, hash={}]: Effective base fee calculated: {} wei",
+                        id_str, tx_hash_str, fee
+                    );
+                    fee
+                }
+                Err(e) => {
+                    error!(
+                        "TX_PROCESSOR [id={}, hash={}]: Failed to fetch base fee: {}. Rejecting transaction.",
+                        id_str, tx_hash_str, e
+                    );
+                    let error_msg = format!("Failed to fetch base fee: {}", e);
+                    let send_response_result =
+                        tx_request.response_sender.send(Err(error_msg)).await;
+                    if let Err(send_err) = send_response_result {
+                        error!(
+                            "TX_PROCESSOR [id={}, hash={}]: Failed to send error response: {}",
+                            id_str, tx_hash_str, send_err
+                        );
+                    }
+                    continue;
+                }
+            };
+
             // Create a Value with the proper ID for passing to process_wallet_call
             let id_value = if tx_request.id.is_null() {
                 json!(id_str)
@@ -79,14 +113,30 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
                 tx_request.id.clone()
             };
 
-            // Call the wallet sequentially for each transaction
-            let process_wallet_result = process_wallet_call(
-                &tx_request.tx_bytes,
-                &config,
-                id_value,
-                tx_request.app_state,
-            )
-            .await;
+            // Validate transaction fee before processing
+            let fee_validation_result =
+                validate_transaction_fee(&tx_request.raw_tx, effective_base_fee, &id_str);
+
+            // If fee validation failed, don't proceed to wallet call
+            let process_wallet_result = match fee_validation_result {
+                Ok(_) => {
+                    // Call the wallet sequentially for each transaction
+                    process_wallet_call(
+                        &tx_request.tx_bytes,
+                        &config,
+                        id_value,
+                        tx_request.app_state,
+                    )
+                    .await
+                }
+                Err(error_msg) => {
+                    error!(
+                        "TX_PROCESSOR [id={}, hash={}]: Fee validation failed: {}",
+                        id_str, tx_hash_str, error_msg
+                    );
+                    Err(error_msg)
+                }
+            };
             let response = match process_wallet_result {
                 Ok(_) => {
                     let duration = start.elapsed();
@@ -141,7 +191,7 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
     );
 
     // Validate transaction
-    let (validation_result, tx_bytes_opt) = validate_transaction(&req);
+    let (validation_result, tx_bytes_opt) = validate_transaction(&req, None);
 
     // If validation failed, return the error
     if let Err(error_json) = validation_result {
@@ -238,18 +288,70 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
     })
 }
 
+/// Validates just the transaction fee without needing a full RPC request
+fn validate_transaction_fee(
+    raw_tx: &str,
+    effective_base_fee: U256,
+    id: &str,
+) -> Result<(), String> {
+    let tx_bytes = match decode_hex_transaction(raw_tx, id) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Err(format!(
+                "Invalid transaction format: {}",
+                error["error"]["message"].as_str().unwrap_or("unknown")
+            ))
+        }
+    };
+
+    match validate_rlp_and_gas_fee(&tx_bytes, Some(effective_base_fee), id) {
+        Ok(_) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// Validates an incoming transaction request and returns the decoded transaction bytes
-pub fn validate_transaction(req: &RpcRequest) -> (Result<(), Value>, Option<Vec<u8>>) {
-    let id = if req.id.is_null() {
+pub fn validate_transaction(
+    req: &RpcRequest,
+    effective_base_fee: Option<U256>,
+) -> (Result<(), Value>, Option<Vec<u8>>) {
+    let id = extract_transaction_id(req);
+
+    let raw_tx = match extract_raw_transaction(req, &id) {
+        Ok(tx) => tx,
+        Err(error) => return (Err(error), None),
+    };
+
+    let tx_bytes = match decode_hex_transaction(&raw_tx, &id) {
+        Ok(bytes) => bytes,
+        Err(error) => return (Err(error), None),
+    };
+
+    if let Err(error) = validate_rlp_and_gas_fee(&tx_bytes, effective_base_fee, &id) {
+        return (Err(error.to_json_rpc_error(req.id.clone())), None);
+    }
+
+    let hash = format!("{:#x}", compute_transaction_hash(&tx_bytes));
+    debug!(
+        "TX_VALIDATE [id={}, hash={}]: Validation successful",
+        id, hash
+    );
+    (Ok(()), Some(tx_bytes))
+}
+
+/// Extracts and formats the transaction ID from the request
+fn extract_transaction_id(req: &RpcRequest) -> String {
+    if req.id.is_null() {
         "null".to_string()
     } else {
         req.id.to_string()
-    };
+    }
+}
 
-    // Extract the raw transaction from the request
+/// Extracts the raw transaction string from the request parameters
+fn extract_raw_transaction(req: &RpcRequest, id: &str) -> Result<String, Value> {
     let raw_tx = req.params[0].as_str().unwrap_or("");
 
-    // Log full transaction request
     debug!(
         "TX_VALIDATE [id={}]: Validating transaction, raw_tx_len={}, raw_tx={}",
         id,
@@ -257,18 +359,19 @@ pub fn validate_transaction(req: &RpcRequest) -> (Result<(), Value>, Option<Vec<
         raw_tx
     );
 
-    // Check if transaction starts with 0x
     if !raw_tx.starts_with("0x") {
         warn!(
             "TX_VALIDATE [id={}]: Raw transaction doesn't start with '0x'",
             id
         );
-        return (
-            Err(AppError::InvalidTransactionFormat.to_json_rpc_error(req.id.clone())),
-            None,
-        );
+        return Err(AppError::InvalidTransactionFormat.to_json_rpc_error(req.id.clone()));
     }
 
+    Ok(raw_tx.to_string())
+}
+
+/// Decodes hex string to transaction bytes with proper validation
+fn decode_hex_transaction(raw_tx: &str, id: &str) -> Result<Vec<u8>, Value> {
     // Remove "0x" prefix and pad with leading zero if the length is odd
     let hex_str = if raw_tx.len() % 2 != 0 {
         debug!("TX_VALIDATE [id={}]: Odd-length hex string, padding", id);
@@ -278,12 +381,9 @@ pub fn validate_transaction(req: &RpcRequest) -> (Result<(), Value>, Option<Vec<
     };
 
     // Decode from hex
-    let tx_bytes = match hex::decode(hex_str) {
+    match hex::decode(hex_str) {
         Ok(bytes) => {
-            // Compute hash after we have the bytes for better logging
             let hash = format!("{:#x}", compute_transaction_hash(&bytes));
-
-            // Log full bytes
             let full_bytes = format!("0x{}", hex::encode(&bytes));
 
             debug!(
@@ -293,40 +393,90 @@ pub fn validate_transaction(req: &RpcRequest) -> (Result<(), Value>, Option<Vec<
                 bytes.len(),
                 full_bytes
             );
-            bytes
+            Ok(bytes)
         }
         Err(e) => {
             warn!("TX_VALIDATE [id={}]: Invalid hex format: {}", id, e);
-            return (
-                Err(AppError::InvalidTransactionFormat.to_json_rpc_error(req.id.clone())),
-                None,
-            );
+            Err(AppError::InvalidTransactionFormat
+                .to_json_rpc_error(serde_json::Value::String(id.to_string())))
         }
-    };
+    }
+}
 
-    // Validate RLP format
-    match rlp::decode::<Transaction>(&tx_bytes) {
+/// Validates RLP format and gas fee parameters
+fn validate_rlp_and_gas_fee(
+    tx_bytes: &[u8],
+    effective_base_fee: Option<U256>,
+    id: &str,
+) -> Result<(), AppError> {
+    match rlp::decode::<Transaction>(tx_bytes) {
         Ok(tx) => {
-            let hash = format!("{:#x}", compute_transaction_hash(&tx_bytes));
+            let hash = format!("{:#x}", compute_transaction_hash(tx_bytes));
             debug!("TX_VALIDATE [id={}, hash={}]: RLP decoded successfully, nonce={:?}, gas_price={:?}",
                 id, hash, tx.nonce, tx.gas_price);
+
+            // Validate gas fee if effective_base_fee is provided
+            if let Some(effective_base_fee) = effective_base_fee {
+                validate_gas_fee(&tx, effective_base_fee, id)?;
+            }
+            Ok(())
         }
         Err(e) => {
             warn!("TX_VALIDATE [id={}]: Failed to decode RLP: {}", id, e);
-            return (
-                Err(AppError::InvalidTransactionFormat.to_json_rpc_error(req.id.clone())),
-                None,
-            );
+            Err(AppError::InvalidTransactionFormat)
         }
+    }
+}
+
+/// Validates the gas fee parameters of a transaction against the effective base
+/// fee
+///
+/// This function only validates the base fee requirement because:
+/// 1. Base fee is the minimum requirement for block inclusion post-EIP-1559
+/// 2. A transaction with maxFeePerGas >= baseFeePerGas can always be included
+/// 3. Validating priority fees would incorrectly reject valid transactions
+/// 4. The actual priority fee is calculated as: min(maxPriorityFeePerGas,
+///    maxFeePerGas - baseFeePerGas)
+///
+/// For example: maxFeePerGas=100 Gwei, maxPriorityFeePerGas=0, baseFeePerGas=50
+/// Gwei
+/// - Transaction is valid (100 >= 50)
+fn validate_gas_fee(tx: &Transaction, effective_base_fee: U256, id: &str) -> Result<(), AppError> {
+    // Determine the maximum fee the transaction is willing to pay
+    let tx_max_fee = if let Some(max_fee_per_gas) = tx.max_fee_per_gas {
+        // EIP-1559 transaction - check maxFeePerGas
+        debug!(
+            "TX_VALIDATE [id={}]: EIP-1559 transaction, max_fee_per_gas={}, max_priority_fee_per_gas={:?}",
+            id, max_fee_per_gas, tx.max_priority_fee_per_gas
+        );
+        max_fee_per_gas
+    } else {
+        // Legacy transaction - check gasPrice
+        debug!(
+            "TX_VALIDATE [id={}]: Legacy transaction, gas_price={:?}",
+            id, tx.gas_price
+        );
+        tx.gas_price.unwrap_or(U256::zero())
     };
 
-    // Return successful validation with decoded bytes
-    let hash = format!("{:#x}", compute_transaction_hash(&tx_bytes));
+    // Check if transaction fee meets the effective base fee requirement
+    if tx_max_fee < effective_base_fee {
+        warn!(
+            "TX_VALIDATE [id={}]: Transaction fee too low. Required: {} wei, Provided: {} wei",
+            id, effective_base_fee, tx_max_fee
+        );
+        return Err(AppError::insufficient_gas_fee(
+            effective_base_fee,
+            tx_max_fee,
+        ));
+    }
+
     debug!(
-        "TX_VALIDATE [id={}, hash={}]: Validation successful",
-        id, hash
+        "TX_VALIDATE [id={}]: Gas fee validation passed. Required: {} wei, Provided: {} wei",
+        id, effective_base_fee, tx_max_fee
     );
-    (Ok(()), Some(tx_bytes))
+
+    Ok(())
 }
 
 /// Computes transaction hash from raw bytes
