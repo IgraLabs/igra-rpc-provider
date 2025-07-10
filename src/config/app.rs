@@ -1,0 +1,140 @@
+use crate::error::AppError;
+use config::{Config, File};
+use serde::Deserialize;
+use std::env;
+use tracing::{debug, info};
+
+// Re-export domain-specific configurations
+pub use super::{
+    validate_all_configs, ConfigValidation, GasConfig, MiningConfig, ProxyConfig, SecurityConfig,
+    ServerConfig, WalletConfig,
+};
+
+/// Main application configuration that composes all domain-specific configurations
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppConfig {
+    /// HTTP server configuration
+    pub server: ServerConfig,
+    /// EL proxy configuration (replaces old ElConfig)
+    #[serde(alias = "el")]
+    pub proxy: ProxyConfig,
+    /// Wallet connection configuration
+    pub wallet: WalletConfig,
+    /// Security and whitelist configuration
+    pub security: SecurityConfig,
+    /// Mining configuration
+    pub mining: MiningConfig,
+    /// Gas pricing configuration
+    #[serde(default)]
+    pub gas: GasConfig,
+}
+
+/// Legacy ElConfig for backward compatibility during transition
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ElConfig {
+    pub url: String,
+}
+
+// Convert ElConfig to ProxyConfig for backward compatibility
+impl From<ElConfig> for ProxyConfig {
+    fn from(el_config: ElConfig) -> Self {
+        ProxyConfig::with_el_url(el_config.url)
+    }
+}
+
+impl AppConfig {
+    /// Load application configuration from file and environment variables
+    pub fn load() -> Result<Self, AppError> {
+        let env_mappings = [
+            // Server configuration
+            ("SERVER_HOST", "server.host"),
+            ("SERVER_PORT", "server.port"),
+            // Proxy configuration (backward compatibility)
+            ("EL_URL", "proxy.el_url"),
+            ("PROXY_TIMEOUT_SECONDS", "proxy.timeout_seconds"),
+            ("PROXY_MAX_RETRIES", "proxy.max_retries"),
+            ("PROXY_RETRY_DELAY_MS", "proxy.retry_delay_ms"),
+            // Wallet configuration
+            ("WALLET_DAEMON_URI", "wallet.wallet_daemon_uri"),
+            ("WALLET_TO_ADDRESS", "wallet.to_address"),
+            // Security configuration
+            ("SECURITY_ENABLE_WHITELIST", "security.enable_whitelist"),
+            // Mining configuration
+            ("MINING_REQUIRED_PREFIX", "mining.required_prefix"),
+            ("MINING_TIMEOUT_SECONDS", "mining.timeout_seconds"),
+            // Gas configuration
+            ("GAS_MIN_BASE_FEE_GWEI", "gas.min_base_fee_gwei"),
+        ];
+
+        let mut builder = Config::builder().add_source(File::with_name("config").required(true));
+
+        for (env_var, config_path) in env_mappings {
+            if let Ok(value) = env::var(env_var) {
+                debug!("Overriding {} with value: {}", config_path, &value);
+                builder = builder
+                    .set_override(config_path, value)
+                    .map_err(|e| AppError::ConfigError(e.to_string()))?;
+            }
+        }
+
+        let config = builder
+            .build()
+            .map_err(|e| AppError::ConfigError(e.to_string()))?
+            .try_deserialize::<AppConfig>()
+            .map_err(|e| AppError::ConfigError(e.to_string()))?;
+
+        // Validate all domain-specific configurations
+        Self::validate_config(&config)?;
+
+        info!("Loaded config: {:?}", config);
+        Ok(config)
+    }
+
+    /// Validate all domain-specific configurations
+    fn validate_config(config: &AppConfig) -> Result<(), AppError> {
+        // Validate each domain configuration
+        config
+            .server
+            .validate()
+            .map_err(|e| AppError::ConfigError(format!("Server config: {}", e)))?;
+
+        config
+            .proxy
+            .validate()
+            .map_err(|e| AppError::ConfigError(format!("Proxy config: {}", e)))?;
+
+        config
+            .wallet
+            .validate()
+            .map_err(|e| AppError::ConfigError(format!("Wallet config: {}", e)))?;
+
+        config
+            .security
+            .validate()
+            .map_err(|e| AppError::ConfigError(format!("Security config: {}", e)))?;
+
+        config
+            .mining
+            .validate()
+            .map_err(|e| AppError::ConfigError(format!("Mining config: {}", e)))?;
+
+        config
+            .gas
+            .validate()
+            .map_err(|e| AppError::ConfigError(format!("Gas config: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Get the EL URL for backward compatibility
+    pub fn el_url(&self) -> &str {
+        self.proxy.el_url()
+    }
+
+    /// Convert to legacy ElConfig for backward compatibility
+    pub fn to_el_config(&self) -> ElConfig {
+        ElConfig {
+            url: self.proxy.el_url().to_string(),
+        }
+    }
+}

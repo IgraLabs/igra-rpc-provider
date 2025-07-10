@@ -8,99 +8,185 @@ use axum::{
     extract::{Json, State},
     response::IntoResponse,
 };
+use serde_json::Value;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{error, info, warn};
 
 /// Handles JSON-RPC requests and routes them to the appropriate handler.
+/// Focuses solely on HTTP request/response handling and delegates business logic to services.
 pub async fn handle_rpc(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RpcRequest>,
 ) -> impl IntoResponse {
-    let method = req.method.clone();
-    let id = req.id.to_string();
+    let request_context = RequestContext::new(&req);
 
-    // Check if the whitelist is enabled in configuration
-    if state.config.security.enable_whitelist && !whitelist::is_method_allowed(&method) {
-        warn!("Unauthorized RPC method call attempted: {}", method);
-        return Json(AppError::MethodNotAllowed(method.clone()).to_json_rpc_error(req.id));
+    // Log incoming request
+    log_incoming_request(&request_context);
+
+    // Validate request authorization
+    if let Some(error_response) = validate_request_authorization(&state, &req, &request_context) {
+        return error_response;
     }
 
-    info!("RPC REQUEST [id={}]: Received method={}", id, method);
+    // Route request to appropriate service and measure performance
+    let start_time = Instant::now();
+    let result = route_request_to_service(&state, req, &request_context).await;
+    let duration = start_time.elapsed();
 
-    let result = match method.as_str() {
-        "eth_sendRawTransaction" => {
-            // Get full params
-            let full_params = match req.params.get(0) {
-                Some(param) => param.to_string(),
-                None => "empty".to_string(),
-            };
+    // Log response and return
+    log_response(&request_context, &result, duration);
+    Json(result)
+}
 
-            // Get payload size if possible
-            let payload_size = req
-                .params
-                .get(0)
-                .and_then(|v| v.as_str())
-                .map(|s| (s.len() / 2).saturating_sub(1)) // Rough estimate: hex string / 2 - 1 for 0x
-                .unwrap_or(0);
+/// Context information for request processing and logging
+struct RequestContext {
+    method: String,
+    id: String,
+    payload_info: PayloadInfo,
+}
 
-            info!(
-                "RPC REQUEST [id={}]: Processing transaction, params={}, est_payload_size={} bytes",
-                id, full_params, payload_size
-            );
+/// Information about request payload for logging
+struct PayloadInfo {
+    params_summary: String,
+    estimated_size: usize,
+}
 
-            // Process transaction and return hash immediately, with background wallet processing
-            let start_time = std::time::Instant::now();
-            let result = transaction::process_transaction(req, state.clone()).await;
-            let duration = start_time.elapsed();
+impl RequestContext {
+    fn new(req: &RpcRequest) -> Self {
+        let method = req.method.clone();
+        let id = req.id.to_string();
+        let payload_info = PayloadInfo::extract_from_request(req);
 
-            // Extract result or error for logging
-            if let Some(result_value) = result.get("result") {
-                let tx_hash = result_value.as_str().unwrap_or("unknown");
-                info!("RPC RESPONSE [id={}, hash={}]: Transaction processed successfully, time={:?}, payload_size={} bytes, request_payload={}",
-                    id, tx_hash, duration, payload_size, full_params);
-            } else if let Some(error) = result.get("error") {
-                error!("RPC RESPONSE [id={}]: Transaction processing failed, error={}, time={:?}, payload={}",
-                    id, error, duration, full_params);
-            }
-
-            axum::Json(result)
+        Self {
+            method,
+            id,
+            payload_info,
         }
-        // For all other methods, just forward to EL using the original logic
+    }
+}
+
+impl PayloadInfo {
+    fn extract_from_request(req: &RpcRequest) -> Self {
+        let params_summary = match req.params.get(0) {
+            Some(param) => param.to_string(),
+            None => "empty".to_string(),
+        };
+
+        let estimated_size = req
+            .params
+            .get(0)
+            .and_then(|v| v.as_str())
+            .map(|s| (s.len() / 2).saturating_sub(1)) // Rough estimate: hex string / 2 - 1 for 0x
+            .unwrap_or(0);
+
+        Self {
+            params_summary,
+            estimated_size,
+        }
+    }
+}
+
+/// Log incoming request with appropriate detail level
+fn log_incoming_request(ctx: &RequestContext) {
+    info!(
+        "RPC REQUEST [id={}]: Received method={}",
+        ctx.id, ctx.method
+    );
+
+    if ctx.method == "eth_sendRawTransaction" {
+        info!(
+            "RPC REQUEST [id={}]: Processing transaction, params={}, est_payload_size={} bytes",
+            ctx.id, ctx.payload_info.params_summary, ctx.payload_info.estimated_size
+        );
+    }
+}
+
+/// Validate request authorization using whitelist if enabled
+fn validate_request_authorization(
+    state: &Arc<AppState>,
+    req: &RpcRequest,
+    ctx: &RequestContext,
+) -> Option<Json<Value>> {
+    if state.config.security.enable_whitelist && !whitelist::is_method_allowed(&ctx.method) {
+        warn!("Unauthorized RPC method call attempted: {}", ctx.method);
+        return Some(Json(
+            AppError::MethodNotAllowed(ctx.method.clone()).to_json_rpc_error(req.id.clone()),
+        ));
+    }
+    None
+}
+
+/// Route request to the appropriate service based on method
+async fn route_request_to_service(
+    state: &Arc<AppState>,
+    req: RpcRequest,
+    ctx: &RequestContext,
+) -> Value {
+    match ctx.method.as_str() {
+        "eth_sendRawTransaction" => {
+            info!(
+                "RPC REQUEST [id={}]: Routing to transaction service",
+                ctx.id
+            );
+            handle_transaction_request(state, req).await
+        }
         _ => {
             info!(
-                "RPC REQUEST [id={}]: Forwarding method={} to execution layer",
-                id, method
+                "RPC REQUEST [id={}]: Routing to proxy service for EL forwarding",
+                ctx.id
             );
-
-            let start_time = std::time::Instant::now();
-            let result = state.proxy_service.forward_to_el(req).await;
-            let duration = start_time.elapsed();
-
-            // Extract result or error for logging
-            if result.0.get("error").is_some() {
-                error!(
-                    "RPC RESPONSE [id={}]: Execution layer returned error: {:?}, time={:?}",
-                    id,
-                    result.0.get("error"),
-                    duration
-                );
-            } else {
-                info!("RPC RESPONSE [id={}]: Execution layer request completed successfully, time={:?}",
-                    id, duration);
-            }
-
-            result
+            handle_proxy_request(state, req).await
         }
-    };
+    }
+}
 
-    result
+/// Handle transaction processing requests
+async fn handle_transaction_request(state: &Arc<AppState>, req: RpcRequest) -> Value {
+    transaction::process_transaction(req, state.clone()).await
+}
+
+/// Handle proxy forwarding requests
+async fn handle_proxy_request(state: &Arc<AppState>, req: RpcRequest) -> Value {
+    let result = state.proxy_service.forward_to_el(req).await;
+    result.0 // Extract the Value from Json wrapper
+}
+
+/// Log response with appropriate detail level
+fn log_response(ctx: &RequestContext, result: &Value, duration: std::time::Duration) {
+    if let Some(result_value) = result.get("result") {
+        if ctx.method == "eth_sendRawTransaction" {
+            let tx_hash = result_value.as_str().unwrap_or("unknown");
+            info!(
+                "RPC RESPONSE [id={}, hash={}]: Transaction processed successfully, time={:?}, payload_size={} bytes",
+                ctx.id, tx_hash, duration, ctx.payload_info.estimated_size
+            );
+        } else {
+            info!(
+                "RPC RESPONSE [id={}]: Request completed successfully, time={:?}",
+                ctx.id, duration
+            );
+        }
+    } else if let Some(error) = result.get("error") {
+        if ctx.method == "eth_sendRawTransaction" {
+            error!(
+                "RPC RESPONSE [id={}]: Transaction processing failed, error={}, time={:?}, payload={}",
+                ctx.id, error, duration, ctx.payload_info.params_summary
+            );
+        } else {
+            error!(
+                "RPC RESPONSE [id={}]: Request failed, error={:?}, time={:?}",
+                ctx.id, error, duration
+            );
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{
-        AppConfig, ElConfig, GasConfig, MiningConfig, SecurityConfig, ServerConfig, WalletConfig,
+        AppConfig, GasConfig, MiningConfig, ProxyConfig, SecurityConfig, ServerConfig, WalletConfig,
     };
     use serde_json::json;
 
@@ -111,14 +197,12 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: 8535,
             },
-            el: ElConfig {
-                url: "http://localhost:12345".to_string(),
-            },
+            proxy: ProxyConfig::with_el_url("http://localhost:12345".to_string()),
             wallet: WalletConfig {
                 wallet_daemon_uri: "http://localhost:8082".to_string(),
                 to_address: "".to_string(),
             },
-            security: SecurityConfig { enable_whitelist },
+            security: SecurityConfig::with_whitelist(enable_whitelist),
             mining: MiningConfig::default(),
             gas: GasConfig::default(),
         }

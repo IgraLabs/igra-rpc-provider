@@ -43,7 +43,7 @@ async fn main() -> Result<(), AppError> {
     debug!(?config, "Config loaded");
     info!("IGRA RPC PROVIDER STARTING");
     info!("Listening on: {}", addr);
-    info!("EL client URL: {}", config.el.url);
+    info!("EL client URL: {}", config.el_url());
     info!("KASPA wallet: {}", config.wallet.wallet_daemon_uri);
 
     // Start the transaction processor and get the sender
@@ -59,17 +59,19 @@ async fn main() -> Result<(), AppError> {
         wallet_caller_result.expect("WalletCaller should have been successfully initialized"),
     );
 
-    // Create the new services
-    let gas_price_service = Arc::new(GasPriceService::new(config.gas.clone()));
-    let proxy_service = ProxyService::new(config.el.url.clone(), gas_price_service);
+    // Create the new services using dependency injection
+    let gas_price_service = GasPriceService::new(config.gas.clone());
+    let proxy_service = ProxyService::new(config.el_url().to_string(), gas_price_service);
 
-    // Set up the shared state
-    let state = Arc::new(AppState {
-        config,
-        transaction_sender,
-        wallet_caller,
-        proxy_service,
-    });
+    // Set up the shared state with new dependency injection
+    let state = Arc::new(
+        AppState::new(config, transaction_sender, wallet_caller, proxy_service)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to create application state: {}", e);
+                process::exit(1);
+            }),
+    );
 
     // Build the Axum router
     let app = Router::new()
