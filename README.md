@@ -22,6 +22,30 @@ Therefore, the **IGRA RPC Provider**:
 
 Currently, (the IGRA version of) the KASPA Wallet only supports a CLI interface. Consequently, the handler for `eth_sendRawTransaction` calls a configurable shell command to instruct the KASPA Wallet on sending a transaction with the L2 payload to KASPA DAG. This interface is planned for future improvements.
 
+## Architecture Overview
+
+The IGRA RPC Provider is built using **Domain-Driven Design (DDD)** principles with **Single Responsibility Principle (SRP)** to ensure maintainability and testability. The architecture consists of three main layers:
+
+### 🏗️ Layered Architecture
+- **API Layer**: Handles HTTP requests and JSON-RPC protocol concerns
+- **Service Layer**: Contains business logic with domain-specific services
+- **Client Layer**: Manages external service communications (EL, Wallet, etc.)
+
+### 🔧 Core Services
+- **Transaction Processor**: Handles Ethereum transaction validation and processing
+- **Gas Manager**: Manages gas price calculation and EIP-1559 validation
+- **Proxy Service**: Forwards requests to the Execution Layer
+- **Wallet Service**: Abstracts Kaspa wallet operations and communication
+
+### 📋 Configuration Management
+Domain-specific configuration modules with comprehensive validation:
+- Server, Gas, Wallet, Proxy, Security, and Mining configurations
+- Runtime validation and structured error handling
+- Backward compatibility with existing configuration formats
+
+### 🔍 For Detailed Architecture Information
+See [Architecture Documentation](doc/architecture.md) for comprehensive diagrams, service interactions, design decisions, and implementation details.
+
 ## Features
 ✅ **Proxy Mode**: Transparently forwards "read-only" JSON-RPC requests (`eth_blockNumber`, `eth_getBalance`, etc.) to the IGRA EL client.  
 ✅ **Custom Handling for `eth_sendRawTransaction`**:
