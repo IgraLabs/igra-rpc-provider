@@ -2,12 +2,12 @@
 host = "0.0.0.0"
 port = 8535
 
-[el]
-url = "http://execution-layer:8545"
+[proxy]
+el_url = "http://execution-layer:8545"
 
 [wallet]
 wallet_daemon_uri = "http://kaswallet:8082"
-to_address = "kaspadev:qpm06zv507sh59hjevsmkkgj9kv0q7a02wtnxt6l9qcvjk7dqtysy9kg4u3um"
+to_address = "kaspatest:qpv8hxvmtvu0tjruup8y5ggqnx9qt5cre32vxrk8073v28w94g99xt57cy60h"
 
 [security]
 enable_whitelist = true

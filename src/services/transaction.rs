@@ -78,7 +78,7 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
 
             // Calculate effective base fee for this processing cycle
             let effective_base_fee = match gas_price_service
-                .get_effective_base_fee(&config.el.url)
+                .get_effective_base_fee(config.el_url())
                 .await
             {
                 Ok(fee) => {
