@@ -6,8 +6,8 @@ use tracing::{debug, info};
 
 // Re-export domain-specific configurations
 pub use super::{
-    validate_all_configs, ConfigValidation, GasConfig, MiningConfig, ProxyConfig, SecurityConfig,
-    ServerConfig, WalletConfig,
+    validate_all_configs, ConfigValidation, GasConfig, MiningConfig, ProxyConfig, RetryConfig,
+    SecurityConfig, ServerConfig, WalletConfig,
 };
 
 /// Main application configuration that composes all domain-specific configurations
@@ -27,6 +27,9 @@ pub struct AppConfig {
     /// Gas pricing configuration
     #[serde(default)]
     pub gas: GasConfig,
+    /// Retry configuration for transient errors
+    #[serde(default)]
+    pub retry: RetryConfig,
 }
 
 /// Legacy ElConfig for backward compatibility during transition
@@ -64,6 +67,10 @@ impl AppConfig {
             ("MINING_TIMEOUT_SECONDS", "mining.timeout_seconds"),
             // Gas configuration
             ("GAS_MIN_BASE_FEE_GWEI", "gas.min_base_fee_gwei"),
+            // Retry configuration
+            ("RETRY_MAX_ATTEMPTS", "retry.max_attempts"),
+            ("RETRY_INITIAL_DELAY_MS", "retry.initial_delay_ms"),
+            ("RETRY_MAX_DELAY_MS", "retry.max_delay_ms"),
         ];
 
         let mut builder = Config::builder().add_source(File::with_name("config").required(true));
@@ -122,6 +129,11 @@ impl AppConfig {
             .gas
             .validate()
             .map_err(|e| AppError::ConfigError(format!("Gas config: {}", e)))?;
+
+        config
+            .retry
+            .validate()
+            .map_err(|e| AppError::ConfigError(format!("Retry config: {}", e)))?;
 
         Ok(())
     }

@@ -20,3 +20,11 @@ min_base_fee_gwei = 100
 required_prefix = [0x97, 0xb1]
 # Mining timeout in seconds (valid range: 0-300, default: 10)
 timeout_seconds = 10
+
+[retry]
+# Maximum number of retry attempts for transient errors (default: 3)
+max_attempts = 10
+# Initial delay between retries in milliseconds (default: 100)
+initial_delay_ms = 100
+# Maximum delay between retries in milliseconds (default: 3000)
+max_delay_ms = 3000

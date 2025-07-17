@@ -7,6 +7,7 @@ pub mod app;
 pub mod gas;
 pub mod mining;
 pub mod proxy;
+pub mod retry;
 pub mod security;
 pub mod server;
 pub mod wallet;
@@ -18,6 +19,7 @@ pub use app::{AppConfig, ElConfig};
 pub use gas::GasConfig;
 pub use mining::MiningConfig;
 pub use proxy::ProxyConfig;
+pub use retry::RetryConfig;
 pub use security::SecurityConfig;
 pub use server::ServerConfig;
 pub use wallet::{WalletConfig, WalletNetwork};
@@ -60,6 +62,12 @@ impl ConfigValidation for ServerConfig {
 }
 
 impl ConfigValidation for WalletConfig {
+    fn validate(&self) -> Result<(), String> {
+        self.validate()
+    }
+}
+
+impl ConfigValidation for RetryConfig {
     fn validate(&self) -> Result<(), String> {
         self.validate()
     }

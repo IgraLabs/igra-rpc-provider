@@ -75,6 +75,14 @@ pub enum AppError {
     /// Error indicates that a transaction's gas fee is insufficient.
     #[error("Transaction fee is too low. Required base fee: {required} wei, transaction max fee: {provided} wei")]
     InsufficientGasFee { required: U256, provided: U256 },
+
+    /// Error indicates UTXO exhaustion (no funds to send).
+    #[error("UTXO exhausted: no funds available to send")]
+    UtxoExhausted,
+
+    /// Error indicates retry attempts have been exhausted.
+    #[error("Retry exhausted after {attempts} attempts: {reason}")]
+    RetryExhausted { attempts: u32, reason: String },
 }
 
 // Add conversion from WalletError to AppError
@@ -149,6 +157,14 @@ impl AppError {
             AppError::InsufficientGasFee { required, provided } => (
                 -32000,
                 format!("Transaction fee is too low. Required base fee: {} wei, transaction max fee: {} wei", required, provided),
+            ),
+            AppError::UtxoExhausted => (
+                -32014,
+                "UTXO exhausted: no funds available to send".to_string(),
+            ),
+            AppError::RetryExhausted { attempts, reason } => (
+                -32015,
+                format!("Retry exhausted after {} attempts: {}", attempts, reason),
             ),
         };
 

@@ -561,8 +561,9 @@ pub async fn process_wallet_call(
         Some(tx_hash_str.clone()),
     );
 
+    // Use retry-enabled method with retry config
     if let Err(err) = wallet_caller
-        .mine_and_send_transaction(transaction_params, &miner)
+        .mine_and_send_transaction_with_retry(transaction_params, &miner, &config.retry)
         .await
     {
         let error_msg = format!("KASPA Wallet call failed: {}", err);
