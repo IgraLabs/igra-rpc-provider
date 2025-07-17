@@ -54,6 +54,10 @@ pub static ALLOWED_METHODS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     methods.insert("web3_clientVersion");
     methods.insert("web3_sha3");
 
+    // debug methods
+    methods.insert("debug_traceTransaction");
+    methods.insert("debug_traceCall");
+
     methods
 });
 

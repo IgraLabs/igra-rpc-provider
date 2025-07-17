@@ -100,6 +100,7 @@ impl L2Data {
 pub struct EntryTransactionService {
     wallet_caller: WalletCaller,
     transaction_miner: TransactionMiner,
+    retry_config: crate::config::RetryConfig,
 }
 
 impl EntryTransactionService {
@@ -109,12 +110,14 @@ impl EntryTransactionService {
 
         let wallet_caller = WalletCaller::new(config.wallet.clone()).await?;
         let transaction_miner = TransactionMiner::new(config.mining.clone());
+        let retry_config = config.retry.clone();
 
         info!("EntryTransactionService initialized successfully");
 
         Ok(Self {
             wallet_caller,
             transaction_miner,
+            retry_config,
         })
     }
 
@@ -138,10 +141,14 @@ impl EntryTransactionService {
             serialized,
         );
 
-        // Mine and send transaction
+        // Mine and send transaction with retry support
         let result = self
             .wallet_caller
-            .mine_and_send_transaction(transaction_params, &self.transaction_miner)
+            .mine_and_send_transaction_with_retry(
+                transaction_params,
+                &self.transaction_miner,
+                &self.retry_config,
+            )
             .await?;
 
         info!("Entry transaction processed successfully: {}", result);

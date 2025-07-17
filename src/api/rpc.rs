@@ -186,7 +186,8 @@ fn log_response(ctx: &RequestContext, result: &Value, duration: std::time::Durat
 mod tests {
     use super::*;
     use crate::config::{
-        AppConfig, GasConfig, MiningConfig, ProxyConfig, SecurityConfig, ServerConfig, WalletConfig,
+        AppConfig, GasConfig, MiningConfig, ProxyConfig, RetryConfig, SecurityConfig, ServerConfig,
+        WalletConfig,
     };
     use serde_json::json;
 
@@ -205,6 +206,7 @@ mod tests {
             security: SecurityConfig::with_whitelist(enable_whitelist),
             mining: MiningConfig::default(),
             gas: GasConfig::default(),
+            retry: RetryConfig::default(),
         }
     }
 
@@ -212,13 +214,14 @@ mod tests {
     #[test]
     fn test_method_allowed_by_whitelist() {
         assert!(whitelist::is_method_allowed("eth_getBalance"));
-        assert!(!whitelist::is_method_allowed("debug_traceTransaction"));
+        assert!(whitelist::is_method_allowed("debug_traceTransaction"));
+        assert!(!whitelist::is_method_allowed("admin_addPeer")); // Example of a method not in whitelist
     }
 
     // Test the error response format for disallowed methods
     #[test]
     fn test_error_format_for_disallowed_method() {
-        let method = "debug_traceTransaction".to_string();
+        let method = "admin_addPeer".to_string();
         let id = json!(1);
         let error_json = AppError::MethodNotAllowed(method.clone()).to_json_rpc_error(id);
 
