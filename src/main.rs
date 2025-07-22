@@ -5,7 +5,9 @@ use igra_rpc_provider::{
     clients::wallet_caller::WalletCaller,
     config::AppConfig,
     error::AppError,
-    services::{proxy::ProxyService, transaction::start_transaction_processor},
+    services::{
+        gas_manager::GasManager, proxy::ProxyService, transaction::start_transaction_processor,
+    },
     AppState,
 };
 use std::net::{IpAddr, SocketAddr};
@@ -57,8 +59,11 @@ async fn main() -> Result<(), AppError> {
         wallet_caller_result.expect("WalletCaller should have been successfully initialized"),
     );
 
+    // Create gas manager for proxy service
+    let gas_manager = GasManager::new(config.gas.clone());
+
     // Create the proxy service
-    let proxy_service = ProxyService::new(config.el_url().to_string());
+    let proxy_service = ProxyService::new(config.el_url().to_string(), gas_manager);
 
     // Set up the shared state with new dependency injection
     let state = Arc::new(

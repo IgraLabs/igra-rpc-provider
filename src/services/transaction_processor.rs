@@ -68,16 +68,16 @@ impl TransactionProcessor {
 
         let start = std::time::Instant::now();
 
-        // Calculate effective base fee for this processing cycle
-        let effective_base_fee = self.config.gas.min_protocol_fee_per_gas_wei();
+        // Get minimum protocol fee for validation
+        let min_protocol_fee = self.config.gas.min_protocol_fee_per_gas_wei();
         info!(
-            "TX_PROCESSOR [id={}, hash={}]: Effective base fee calculated: {} wei",
-            id_str, tx_hash_str, effective_base_fee
+            "TX_PROCESSOR [id={}, hash={}]: Minimum protocol fee: {} wei",
+            id_str, tx_hash_str, min_protocol_fee
         );
 
         // Parse and validate the transaction
         match self
-            .process_transaction_simple(&tx_request, &id_str, &tx_hash_str, effective_base_fee)
+            .process_transaction_simple(&tx_request, &id_str, &tx_hash_str, min_protocol_fee)
             .await
         {
             Ok(_) => {
@@ -106,7 +106,7 @@ impl TransactionProcessor {
         tx_request: &TransactionRequest,
         id_str: &str,
         tx_hash_str: &str,
-        effective_base_fee: U256,
+        min_protocol_fee: U256,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Parse the transaction for validation
         let tx: Transaction = rlp::decode(&tx_request.tx_bytes)
@@ -118,7 +118,7 @@ impl TransactionProcessor {
         );
 
         // Validate gas price
-        self.validate_gas_price(&tx, effective_base_fee, id_str, tx_hash_str)?;
+        self.validate_gas_price(&tx, min_protocol_fee, id_str, tx_hash_str)?;
 
         // For now, we'll simulate transaction processing success
         // TODO: Integrate with proper mining service when types align
@@ -137,11 +137,11 @@ impl TransactionProcessor {
         Ok(())
     }
 
-    /// Validate gas price against effective base fee
+    /// Validate gas price against minimum protocol fee
     fn validate_gas_price(
         &self,
         tx: &Transaction,
-        effective_base_fee: U256,
+        min_protocol_fee: U256,
         id_str: &str,
         tx_hash_str: &str,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -149,23 +149,23 @@ impl TransactionProcessor {
         let is_valid = if let (Some(max_fee), Some(max_priority_fee)) =
             (tx.max_fee_per_gas, tx.max_priority_fee_per_gas)
         {
-            // EIP-1559 transaction validation - for now, simple check
-            let is_fee_valid = max_fee >= effective_base_fee && max_priority_fee <= max_fee;
+            // EIP-1559 transaction validation - check max_priority_fee_per_gas
+            let is_fee_valid = max_priority_fee >= min_protocol_fee && max_priority_fee <= max_fee;
 
             if !is_fee_valid {
                 warn!(
-                    "TX_PROCESSOR [id={}, hash={}]: EIP-1559 fee validation failed - max_fee: {}, max_priority_fee: {}, effective_base_fee: {}",
-                    id_str, tx_hash_str, max_fee, max_priority_fee, effective_base_fee
+                    "TX_PROCESSOR [id={}, hash={}]: EIP-1559 fee validation failed - max_fee: {}, max_priority_fee: {}, min_protocol_fee: {}",
+                    id_str, tx_hash_str, max_fee, max_priority_fee, min_protocol_fee
                 );
             }
             is_fee_valid
         } else if let Some(gas_price) = tx.gas_price {
             // Legacy transaction validation
-            let is_price_valid = gas_price >= effective_base_fee;
+            let is_price_valid = gas_price >= min_protocol_fee;
             if !is_price_valid {
                 warn!(
-                    "TX_PROCESSOR [id={}, hash={}]: Legacy gas price validation failed - gas_price: {}, effective_base_fee: {}",
-                    id_str, tx_hash_str, gas_price, effective_base_fee
+                    "TX_PROCESSOR [id={}, hash={}]: Legacy gas price validation failed - gas_price: {}, min_protocol_fee: {}",
+                    id_str, tx_hash_str, gas_price, min_protocol_fee
                 );
             }
             is_price_valid

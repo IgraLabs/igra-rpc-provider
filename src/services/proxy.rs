@@ -1,4 +1,5 @@
 use crate::clients::el_caller::send_rpc_request;
+use crate::services::gas_manager::GasManager;
 use crate::types::rpc::RpcRequest;
 use axum::Json;
 use serde_json::{json, to_value, Value};
@@ -9,12 +10,16 @@ use tracing::{debug, error, info};
 #[derive(Clone)]
 pub struct ProxyService {
     el_url: String,
+    gas_manager: GasManager,
 }
 
 impl ProxyService {
     /// Creates a new ProxyService that forwards requests to the specified EL URL
-    pub fn new(el_url: String) -> Self {
-        Self { el_url }
+    pub fn new(el_url: String, gas_manager: GasManager) -> Self {
+        Self {
+            el_url,
+            gas_manager,
+        }
     }
 
     /// Forward JSON-RPC request to the EL client without any modifications
@@ -59,9 +64,16 @@ impl ProxyService {
         match send_rpc_request(&req_value, &self.el_url).await {
             Ok(response) => {
                 let duration = start.elapsed();
+                let mut final_response = response;
+
+                // If the method is `eth_gasPrice`, floor the result in-place.
+                if method == "eth_gasPrice" {
+                    info!("PROXY [id={}]: Intercepting eth_gasPrice response", id);
+                    self.gas_manager.floor_gas_price_value(&mut final_response);
+                }
 
                 // Log different response types appropriately
-                if let Some(error) = response.get("error") {
+                if let Some(error) = final_response.get("error") {
                     error!(
                         "PROXY [id={}]: EL returned error: {:?}, time={:?}",
                         id, error, duration
@@ -73,7 +85,7 @@ impl ProxyService {
                     );
                 }
 
-                Json(response)
+                Json(final_response)
             }
             Err(err) => {
                 let error_message = format!("EL request failed: {}", err);
@@ -141,7 +153,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let proxy_service = ProxyService::new(server.uri());
+        let gas_manager = crate::services::gas_manager::GasManager::new(crate::config::GasConfig {
+            min_protocol_fee_per_gas_gwei: 100,
+        });
+        let proxy_service = ProxyService::new(server.uri(), gas_manager);
         let request = create_test_request("eth_blockNumber", json!([]));
 
         // Act
@@ -173,7 +188,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let proxy_service = ProxyService::new(server.uri());
+        let gas_manager = crate::services::gas_manager::GasManager::new(crate::config::GasConfig {
+            min_protocol_fee_per_gas_gwei: 100,
+        });
+        let proxy_service = ProxyService::new(server.uri(), gas_manager);
         let request = create_test_request("invalid_method", json!([]));
 
         // Act
@@ -189,7 +207,10 @@ mod tests {
     #[tokio::test]
     async fn test_proxy_handles_network_errors() {
         // Arrange - no mock server, so connection will fail
-        let proxy_service = ProxyService::new("http://invalid-url:9999".to_string());
+        let gas_manager = crate::services::gas_manager::GasManager::new(crate::config::GasConfig {
+            min_protocol_fee_per_gas_gwei: 100,
+        });
+        let proxy_service = ProxyService::new("http://invalid-url:9999".to_string(), gas_manager);
         let request = create_test_request("eth_blockNumber", json!([]));
 
         // Act
@@ -208,12 +229,58 @@ mod tests {
     #[test]
     fn test_update_el_url() {
         // Arrange
-        let mut proxy_service = ProxyService::new("http://old-url".to_string());
+        let gas_manager = crate::services::gas_manager::GasManager::new(crate::config::GasConfig {
+            min_protocol_fee_per_gas_gwei: 100,
+        });
+        let mut proxy_service = ProxyService::new("http://old-url".to_string(), gas_manager);
 
         // Act
         proxy_service.update_el_url("http://new-url".to_string());
 
         // Assert
         assert_eq!(proxy_service.get_el_url(), "http://new-url");
+    }
+
+    #[tokio::test]
+    async fn test_proxy_intercepts_eth_gas_price() {
+        // Arrange
+        let server = MockServer::start().await;
+
+        // Mock response with a gas price below the configured floor
+        let mock_response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": "0x1dcd6500" // 8 gwei (below our 100 gwei floor)
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mock_response))
+            .mount(&server)
+            .await;
+
+        let gas_manager = crate::services::gas_manager::GasManager::new(crate::config::GasConfig {
+            min_protocol_fee_per_gas_gwei: 100, // 100 gwei floor
+        });
+        let proxy_service = ProxyService::new(server.uri(), gas_manager);
+        let request = create_test_request("eth_gasPrice", json!([]));
+
+        // Act
+        let response = proxy_service.forward_to_el(request).await;
+
+        // Assert
+        // The response should have the gas price floored to 100 gwei
+        let result_str = response.0["result"]
+            .as_str()
+            .expect("result should be a string");
+
+        let result_value = if let Some(stripped) = result_str.strip_prefix("0x") {
+            u64::from_str_radix(stripped, 16).expect("valid hex string")
+        } else {
+            u64::from_str_radix(result_str, 16).expect("valid hex string")
+        };
+
+        // 100 gwei = 100 * 10^9 wei
+        assert_eq!(result_value, 100_000_000_000);
     }
 }

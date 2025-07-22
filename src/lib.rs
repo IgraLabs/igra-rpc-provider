@@ -53,7 +53,10 @@ impl AppServices {
         let gas_manager = Arc::new(GasManager::new(config.gas.clone()));
 
         // Create proxy service
-        let proxy_service = Arc::new(ProxyService::new(config.el_url().to_string()));
+        let proxy_service = Arc::new(ProxyService::new(
+            config.el_url().to_string(),
+            gas_manager.as_ref().clone(),
+        ));
 
         // Create wallet service
         let wallet_service = Arc::new(WalletService::new(config.wallet.clone()).await.map_err(
