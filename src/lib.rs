@@ -52,15 +52,8 @@ impl AppServices {
         // Create gas manager service
         let gas_manager = Arc::new(GasManager::new(config.gas.clone()));
 
-        // Create gas price service for proxy
-        let gas_price_service =
-            crate::services::gas_price::GasPriceService::new(config.gas.clone());
-
         // Create proxy service
-        let proxy_service = Arc::new(ProxyService::new(
-            config.el_url().to_string(),
-            gas_price_service,
-        ));
+        let proxy_service = Arc::new(ProxyService::new(config.el_url().to_string()));
 
         // Create wallet service
         let wallet_service = Arc::new(WalletService::new(config.wallet.clone()).await.map_err(

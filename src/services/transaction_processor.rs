@@ -1,5 +1,4 @@
 use crate::config::AppConfig;
-use crate::services::gas_price::GasPriceService;
 use crate::AppState;
 use ethers::types::{Transaction, H256, U256};
 use ethers::utils::{keccak256, rlp};
@@ -25,7 +24,6 @@ pub struct TransactionRequest {
 /// Service responsible for processing transactions with single responsibility
 pub struct TransactionProcessor {
     config: Arc<AppConfig>,
-    gas_price_service: GasPriceService,
     processed_count: u16,
     error_count: u16,
 }
@@ -33,10 +31,8 @@ pub struct TransactionProcessor {
 impl TransactionProcessor {
     /// Creates a new TransactionProcessor with the given configuration
     pub fn new(config: AppConfig) -> Self {
-        let gas_price_service = GasPriceService::new(config.gas.clone());
         Self {
             config: Arc::new(config),
-            gas_price_service,
             processed_count: 0,
             error_count: 0,
         }
@@ -73,28 +69,11 @@ impl TransactionProcessor {
         let start = std::time::Instant::now();
 
         // Calculate effective base fee for this processing cycle
-        let effective_base_fee = match self
-            .gas_price_service
-            .get_effective_base_fee(self.config.el_url())
-            .await
-        {
-            Ok(fee) => {
-                info!(
-                    "TX_PROCESSOR [id={}, hash={}]: Effective base fee calculated: {} wei",
-                    id_str, tx_hash_str, fee
-                );
-                fee
-            }
-            Err(e) => {
-                error!(
-                    "TX_PROCESSOR [id={}, hash={}]: Failed to fetch base fee: {}. Rejecting transaction.",
-                    id_str, tx_hash_str, e
-                );
-                self.handle_error(&tx_request, format!("Failed to fetch base fee: {}", e))
-                    .await;
-                return;
-            }
-        };
+        let effective_base_fee = self.config.gas.min_protocol_fee_per_gas_wei();
+        info!(
+            "TX_PROCESSOR [id={}, hash={}]: Effective base fee calculated: {} wei",
+            id_str, tx_hash_str, effective_base_fee
+        );
 
         // Parse and validate the transaction
         match self

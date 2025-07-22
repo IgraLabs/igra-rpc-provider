@@ -1,6 +1,5 @@
 // Legacy modules (kept for backward compatibility during transition)
 pub mod entry_transaction;
-pub mod gas_price;
 pub mod mining;
 pub mod proxy;
 pub mod transaction;
@@ -18,7 +17,3 @@ pub use transaction_processor::{
 pub use wallet_service::{
     SendTransactionRequest, WalletService, WalletTransactionResult, WalletTransactionStatus,
 };
-
-// Legacy re-exports (maintain API compatibility)
-pub use gas_price::GasPriceService;
-pub use proxy::ProxyService;

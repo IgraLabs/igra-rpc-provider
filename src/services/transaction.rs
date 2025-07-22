@@ -1,7 +1,6 @@
 use crate::clients::wallet_caller::TransactionParams;
 use crate::config::AppConfig;
 use crate::error::AppError;
-use crate::services::gas_price::GasPriceService;
 use crate::services::mining::TransactionMiner;
 use crate::types::rpc::{IgraPayload, RpcRequest, TxTypeId};
 use crate::AppState;
@@ -43,9 +42,6 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
         let mut processed_count: u16 = 0;
         let mut error_count: u16 = 0;
 
-        // Create GasPriceService for fee validation
-        let gas_price_service = GasPriceService::new(config.gas.clone());
-
         // Process transactions one at a time
         while let Some(tx_request) = transaction_receiver.recv().await {
             let tx_hash = compute_transaction_hash(&tx_request.tx_bytes);
@@ -77,34 +73,7 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
             let start = std::time::Instant::now();
 
             // Calculate effective base fee for this processing cycle
-            let effective_base_fee = match gas_price_service
-                .get_effective_base_fee(config.el_url())
-                .await
-            {
-                Ok(fee) => {
-                    info!(
-                        "TX_PROCESSOR [id={}, hash={}]: Effective base fee calculated: {} wei",
-                        id_str, tx_hash_str, fee
-                    );
-                    fee
-                }
-                Err(e) => {
-                    error!(
-                        "TX_PROCESSOR [id={}, hash={}]: Failed to fetch base fee: {}. Rejecting transaction.",
-                        id_str, tx_hash_str, e
-                    );
-                    let error_msg = format!("Failed to fetch base fee: {}", e);
-                    let send_response_result =
-                        tx_request.response_sender.send(Err(error_msg)).await;
-                    if let Err(send_err) = send_response_result {
-                        error!(
-                            "TX_PROCESSOR [id={}, hash={}]: Failed to send error response: {}",
-                            id_str, tx_hash_str, send_err
-                        );
-                    }
-                    continue;
-                }
-            };
+            let effective_base_fee = config.gas.min_protocol_fee_per_gas_wei();
 
             // Create a Value with the proper ID for passing to process_wallet_call
             let id_value = if tx_request.id.is_null() {
@@ -443,13 +412,13 @@ fn validate_rlp_and_gas_fee(
 /// - Transaction is valid (100 >= 50)
 fn validate_gas_fee(tx: &Transaction, effective_base_fee: U256, id: &str) -> Result<(), AppError> {
     // Determine the maximum fee the transaction is willing to pay
-    let tx_max_fee = if let Some(max_fee_per_gas) = tx.max_fee_per_gas {
+    let tx_max_fee = if let Some(max_priority_fee_per_gas) = tx.max_priority_fee_per_gas {
         // EIP-1559 transaction - check maxFeePerGas
         debug!(
             "TX_VALIDATE [id={}]: EIP-1559 transaction, max_fee_per_gas={}, max_priority_fee_per_gas={:?}",
-            id, max_fee_per_gas, tx.max_priority_fee_per_gas
+            id, max_priority_fee_per_gas, tx.max_priority_fee_per_gas
         );
-        max_fee_per_gas
+        max_priority_fee_per_gas
     } else {
         // Legacy transaction - check gasPrice
         debug!(
