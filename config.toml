@@ -13,7 +13,8 @@ to_address = "kaspatest:qpv8hxvmtvu0tjruup8y5ggqnx9qt5cre32vxrk8073v28w94g99xt57
 enable_whitelist = true
 
 [gas]
-min_base_fee_gwei = 100
+# Required: Minimum protocol fee per gas in gwei
+min_protocol_fee_per_gas_gwei = 2000
 
 [mining]
 # Required prefix for mined transaction IDs (default: [0x97, 0xb1])

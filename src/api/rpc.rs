@@ -205,7 +205,7 @@ mod tests {
             },
             security: SecurityConfig::with_whitelist(enable_whitelist),
             mining: MiningConfig::default(),
-            gas: GasConfig::default(),
+            gas: GasConfig::with_min_protocol_fee_per_gas_gwei(100),
             retry: RetryConfig::default(),
         }
     }

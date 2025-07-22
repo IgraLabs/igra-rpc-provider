@@ -278,8 +278,11 @@ mod tests {
 
     #[test]
     fn test_invalid_configuration_error() {
-        let error =
-            GasError::invalid_configuration("min_base_fee_gwei", "0", "must be greater than zero");
+        let error = GasError::invalid_configuration(
+            "min_protocol_fee_per_gas_gwei",
+            "0",
+            "must be greater than zero",
+        );
         assert!(error.is_validation_error());
         assert!(error.is_configuration_error());
         assert!(!error.is_retryable());

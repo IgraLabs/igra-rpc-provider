@@ -37,9 +37,9 @@ impl GasManager {
 
     /// Calculate the configured minimum floor in Wei using checked arithmetic
     fn min_floor_wei(&self) -> Result<U256, AppError> {
-        let gwei = U256::from(self.config.min_base_fee_gwei);
+        let gwei = U256::from(self.config.min_protocol_fee_per_gas_gwei);
         gwei.checked_mul(GWEI_TO_WEI).ok_or_else(|| {
-            AppError::Internal("min_base_fee_gwei multiplication overflow".to_string())
+            AppError::Internal("min_protocol_fee_per_gas_gwei multiplication overflow".to_string())
         })
     }
 
@@ -239,8 +239,8 @@ impl GasManager {
     /// Update gas pricing configuration
     pub fn update_config(&mut self, new_config: GasConfig) {
         info!(
-            "GAS_MANAGER: Updating configuration - old min_base_fee: {} gwei, new: {} gwei",
-            self.config.min_base_fee_gwei, new_config.min_base_fee_gwei
+            "GAS_MANAGER: Updating configuration - old min_protocol_fee: {} gwei, new: {} gwei",
+            self.config.min_protocol_fee_per_gas_gwei, new_config.min_protocol_fee_per_gas_gwei
         );
         self.config = new_config;
 
@@ -275,7 +275,7 @@ mod tests {
 
     fn create_test_gas_manager() -> GasManager {
         let config = GasConfig {
-            min_base_fee_gwei: 10, // 10 gwei minimum
+            min_protocol_fee_per_gas_gwei: 10, // 10 gwei minimum
         };
         GasManager::new(config)
     }

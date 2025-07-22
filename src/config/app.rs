@@ -25,7 +25,6 @@ pub struct AppConfig {
     /// Mining configuration
     pub mining: MiningConfig,
     /// Gas pricing configuration
-    #[serde(default)]
     pub gas: GasConfig,
     /// Retry configuration for transient errors
     #[serde(default)]
@@ -66,7 +65,10 @@ impl AppConfig {
             ("MINING_REQUIRED_PREFIX", "mining.required_prefix"),
             ("MINING_TIMEOUT_SECONDS", "mining.timeout_seconds"),
             // Gas configuration
-            ("GAS_MIN_BASE_FEE_GWEI", "gas.min_base_fee_gwei"),
+            (
+                "MIN_PROTOCOL_FEE_PER_GAS_GWEI",
+                "gas.min_protocol_fee_per_gas_gwei",
+            ),
             // Retry configuration
             ("RETRY_MAX_ATTEMPTS", "retry.max_attempts"),
             ("RETRY_INITIAL_DELAY_MS", "retry.initial_delay_ms"),

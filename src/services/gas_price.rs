@@ -38,9 +38,9 @@ impl GasPriceService {
 
     /// Helper: calculate the configured minimum floor in Wei using checked arithmetic.
     fn min_floor_wei(&self) -> Result<U256, AppError> {
-        let gwei = U256::from(self.config.min_base_fee_gwei);
+        let gwei = U256::from(self.config.min_protocol_fee_per_gas_gwei);
         gwei.checked_mul(GWEI_TO_WEI).ok_or_else(|| {
-            AppError::Internal("min_base_fee_gwei multiplication overflow".to_string())
+            AppError::Internal("min_protocol_fee_per_gas_gwei multiplication overflow".to_string())
         })
     }
 
@@ -149,8 +149,10 @@ mod tests {
     use super::*;
     use crate::config::GasConfig;
 
-    fn create_test_service(min_base_fee_gwei: u64) -> GasPriceService {
-        GasPriceService::new(GasConfig { min_base_fee_gwei })
+    fn create_test_service(min_protocol_fee_per_gas_gwei: u64) -> GasPriceService {
+        GasPriceService::new(GasConfig {
+            min_protocol_fee_per_gas_gwei,
+        })
     }
 
     fn create_test_response_value(gas_price_hex: &str) -> Value {

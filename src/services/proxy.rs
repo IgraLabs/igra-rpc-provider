@@ -156,7 +156,7 @@ mod tests {
 
         let gas_price_service =
             crate::services::gas_price::GasPriceService::new(crate::config::GasConfig {
-                min_base_fee_gwei: 100,
+                min_protocol_fee_per_gas_gwei: 100,
             });
         let proxy_service = ProxyService::new(server.uri(), gas_price_service);
         let request = create_test_request("eth_blockNumber", json!([]));
@@ -190,7 +190,7 @@ mod tests {
 
         let gas_price_service =
             crate::services::gas_price::GasPriceService::new(crate::config::GasConfig {
-                min_base_fee_gwei: 100,
+                min_protocol_fee_per_gas_gwei: 100,
             });
         let proxy_service = ProxyService::new(server.uri(), gas_price_service);
         let request = create_test_request("eth_gasPrice", json!([]));
@@ -225,7 +225,7 @@ mod tests {
 
         let gas_price_service =
             crate::services::gas_price::GasPriceService::new(crate::config::GasConfig {
-                min_base_fee_gwei: 100,
+                min_protocol_fee_per_gas_gwei: 100,
             });
         let proxy_service = ProxyService::new(server.uri(), gas_price_service);
         let request = create_test_request("invalid_method", json!([]));
@@ -245,7 +245,7 @@ mod tests {
         // Arrange - no mock server, so connection will fail
         let gas_price_service =
             crate::services::gas_price::GasPriceService::new(crate::config::GasConfig {
-                min_base_fee_gwei: 100,
+                min_protocol_fee_per_gas_gwei: 100,
             });
         let proxy_service =
             ProxyService::new("http://invalid-url:9999".to_string(), gas_price_service);
@@ -269,7 +269,7 @@ mod tests {
         // Arrange
         let gas_price_service =
             crate::services::gas_price::GasPriceService::new(crate::config::GasConfig {
-                min_base_fee_gwei: 100,
+                min_protocol_fee_per_gas_gwei: 100,
             });
         let mut proxy_service = ProxyService::new("http://old-url".to_string(), gas_price_service);
 

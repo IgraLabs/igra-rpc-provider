@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn test_config_validation_trait() {
-        let gas_config = GasConfig::new();
+        let gas_config = GasConfig::with_min_protocol_fee_per_gas_gwei(100);
         assert!(gas_config.validate().is_ok());
 
         let server_config = ServerConfig::with_address("localhost".to_string(), 8080);
@@ -123,15 +123,18 @@ mod tests {
 
     #[test]
     fn test_validate_all_configs_success() {
-        let configs = vec![GasConfig::new(), GasConfig::with_min_base_fee_gwei(50)];
+        let configs = vec![
+            GasConfig::with_min_protocol_fee_per_gas_gwei(100),
+            GasConfig::with_min_protocol_fee_per_gas_gwei(50),
+        ];
         assert!(validate_all_configs(&configs).is_ok());
     }
 
     #[test]
     fn test_validate_all_configs_failure() {
         let configs = vec![
-            GasConfig::with_min_base_fee_gwei(50), // Valid
-            GasConfig::with_min_base_fee_gwei(0),  // Invalid - zero
+            GasConfig::with_min_protocol_fee_per_gas_gwei(50), // Valid
+            GasConfig::with_min_protocol_fee_per_gas_gwei(0),  // Invalid - zero
         ];
         let result = validate_all_configs(&configs);
         assert!(result.is_err());
@@ -144,7 +147,7 @@ mod tests {
     #[test]
     fn test_all_config_types_importable() {
         // Test that all config types can be created and used
-        let _gas = GasConfig::new();
+        let _gas = GasConfig::with_min_protocol_fee_per_gas_gwei(100);
         let _mining = MiningConfig::new();
         let _proxy = ProxyConfig::new();
         let _security = SecurityConfig::new();
