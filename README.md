@@ -51,6 +51,7 @@ See [Architecture Documentation](doc/architecture.md) for comprehensive diagrams
 ✅ **Custom Handling for `eth_sendRawTransaction`**:
   - Calls the KASPA Wallet for transaction submission to the Base Layer (KASPA DAG).
   - Returns transaction hash only if all checks pass and the transaction gets submitted.  
+✅ **Read-Only Mode**: When enabled via `READ_ONLY=true`, blocks all write operations (`eth_sendRawTransaction`, `personal_*`, `admin_*`).  
 ✅ Structured Logging: Uses `tracing` for detailed logs.  
 ✅ Error Handling: Mimics standard Ethereum JSON-RPC error responses.  
 ---
@@ -164,10 +165,16 @@ The following environment variables can be used:
 | `SERVER_PORT`    | Port this app listen requests at     | `8535`                           |
 | `EL_URL`         | URL of the IGRA EL Client            | `http://127.0.0.1:8545`          |
 | `WALLET_COMMAND` | Shell command to call KASPA Wallet   | `sh -c 'echo {} >> /tmp/tx_log'` |
+| `READ_ONLY`      | Enable read-only mode (blocks writes)| `false`                          |
 
 Example: Run with a custom node URL.
 ```sh
 EL_URL="http://igra-el-client:8545" cargo run
+```
+
+Example: Run in read-only mode (blocks all write operations).
+```sh
+READ_ONLY=true cargo run
 ```
 
 ---

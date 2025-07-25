@@ -11,6 +11,7 @@ to_address = "kaspatest:qpv8hxvmtvu0tjruup8y5ggqnx9qt5cre32vxrk8073v28w94g99xt57
 
 [security]
 enable_whitelist = true
+read_only = false
 
 [gas]
 min_base_fee_gwei = 100

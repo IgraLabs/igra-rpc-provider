@@ -65,3 +65,64 @@ pub static ALLOWED_METHODS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 pub fn is_method_allowed(method: &str) -> bool {
     ALLOWED_METHODS.contains(method)
 }
+
+/// Check if an RPC method is a write operation that modifies state.
+/// Write methods include:
+/// - eth_sendRawTransaction, eth_sendTransaction
+/// - All personal_* methods (account and signing operations)
+/// - All admin_* methods (administrative operations)
+pub fn is_write_method(method: &str) -> bool {
+    matches!(method, "eth_sendRawTransaction" | "eth_sendTransaction")
+        || method.starts_with("personal_")
+        || method.starts_with("admin_")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_write_method_eth_send_raw_transaction() {
+        assert!(is_write_method("eth_sendRawTransaction"));
+    }
+
+    #[test]
+    fn test_is_write_method_eth_send_transaction() {
+        assert!(is_write_method("eth_sendTransaction"));
+    }
+
+    #[test]
+    fn test_is_write_method_personal_methods() {
+        assert!(is_write_method("personal_sign"));
+        assert!(is_write_method("personal_sendTransaction"));
+        assert!(is_write_method("personal_unlockAccount"));
+    }
+
+    #[test]
+    fn test_is_write_method_admin_methods() {
+        assert!(is_write_method("admin_addPeer"));
+        assert!(is_write_method("admin_removePeer"));
+        assert!(is_write_method("admin_startRPC"));
+    }
+
+    #[test]
+    fn test_is_write_method_read_methods() {
+        // These should all return false
+        assert!(!is_write_method("eth_getBalance"));
+        assert!(!is_write_method("eth_blockNumber"));
+        assert!(!is_write_method("eth_call"));
+        assert!(!is_write_method("eth_getCode"));
+        assert!(!is_write_method("net_version"));
+        assert!(!is_write_method("web3_clientVersion"));
+        assert!(!is_write_method("debug_traceTransaction"));
+    }
+
+    #[test]
+    fn test_is_write_method_edge_cases() {
+        // Test methods that might be confused with write methods
+        assert!(!is_write_method("eth_sendRaw")); // Not the full method name
+        assert!(!is_write_method("personal")); // Just the prefix
+        assert!(!is_write_method("admin")); // Just the prefix
+        assert!(!is_write_method("eth_personal_sign")); // Not starting with personal_
+    }
+}
