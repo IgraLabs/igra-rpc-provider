@@ -102,18 +102,28 @@ fn log_incoming_request(ctx: &RequestContext) {
     }
 }
 
-/// Validate request authorization using whitelist if enabled
+/// Validate request authorization using whitelist if enabled and check read-only mode
 fn validate_request_authorization(
     state: &Arc<AppState>,
     req: &RpcRequest,
     ctx: &RequestContext,
 ) -> Option<Json<Value>> {
+    // Check whitelist first if enabled
     if state.config.security.enable_whitelist && !whitelist::is_method_allowed(&ctx.method) {
         warn!("Unauthorized RPC method call attempted: {}", ctx.method);
         return Some(Json(
             AppError::MethodNotAllowed(ctx.method.clone()).to_json_rpc_error(req.id.clone()),
         ));
     }
+
+    // Check read-only mode for write methods
+    if state.config.security.is_read_only() && whitelist::is_write_method(&ctx.method) {
+        error!(method = %ctx.method, "Write method attempted in read-only mode");
+        return Some(Json(
+            AppError::ReadOnlyMode.to_json_rpc_error(req.id.clone()),
+        ));
+    }
+
     None
 }
 
@@ -241,5 +251,64 @@ mod tests {
 
         let config2 = test_config(false); // whitelist disabled
         assert!(!config2.security.enable_whitelist);
+    }
+
+    // Helper to create a test config with read-only mode
+    fn test_config_read_only(enable_whitelist: bool, read_only: bool) -> AppConfig {
+        AppConfig {
+            server: ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 8535,
+            },
+            proxy: ProxyConfig::with_el_url("http://localhost:12345".to_string()),
+            wallet: WalletConfig {
+                wallet_daemon_uri: "http://localhost:8082".to_string(),
+                to_address: "".to_string(),
+            },
+            security: SecurityConfig {
+                enable_whitelist,
+                read_only,
+            },
+            mining: MiningConfig::default(),
+            gas: GasConfig::default(),
+            retry: RetryConfig::default(),
+        }
+    }
+
+    // Test that write methods are blocked in read-only mode
+    #[test]
+    fn test_read_only_mode_blocks_write_methods() {
+        assert!(whitelist::is_write_method("eth_sendRawTransaction"));
+        assert!(whitelist::is_write_method("personal_sign"));
+        assert!(whitelist::is_write_method("admin_addPeer"));
+
+        assert!(!whitelist::is_write_method("eth_getBalance"));
+        assert!(!whitelist::is_write_method("eth_call"));
+    }
+
+    // Test the error response format for read-only mode
+    #[test]
+    fn test_error_format_for_read_only_mode() {
+        let id = json!(1);
+        let error_json = AppError::ReadOnlyMode.to_json_rpc_error(id);
+
+        // Access the JSON fields directly
+        assert_eq!(error_json["error"]["code"], json!(-32000));
+        assert_eq!(
+            error_json["error"]["message"]
+                .as_str()
+                .expect("Error message should be a string"),
+            "Read-only mode is enabled"
+        );
+    }
+
+    // Test the read-only mode configuration
+    #[test]
+    fn test_read_only_mode_in_config() {
+        let config = test_config_read_only(true, true);
+        assert!(config.security.is_read_only());
+
+        let config2 = test_config_read_only(true, false);
+        assert!(!config2.security.is_read_only());
     }
 }

@@ -62,6 +62,7 @@ impl AppConfig {
             ("WALLET_TO_ADDRESS", "wallet.to_address"),
             // Security configuration
             ("SECURITY_ENABLE_WHITELIST", "security.enable_whitelist"),
+            ("READ_ONLY", "security.read_only"),
             // Mining configuration
             ("MINING_REQUIRED_PREFIX", "mining.required_prefix"),
             ("MINING_TIMEOUT_SECONDS", "mining.timeout_seconds"),

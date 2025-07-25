@@ -140,6 +140,7 @@ graph TB
 - `rpc.rs`: JSON-RPC request handling and routing
 - Clean separation of HTTP concerns from business logic
 - Request validation and error formatting
+- Read-only mode enforcement for write operations
 
 ### 2. Service Layer (`src/services/`)
 **Responsibility**: Business logic and domain operations
@@ -180,7 +181,7 @@ graph TB
     GasConfig --> GasValidation[Gas Price Validation]
     WalletConfig --> WalletValidation[URI Validation]
     ProxyConfig --> ProxyValidation[Timeout/Retry Validation]
-    SecurityConfig --> SecurityValidation[Whitelist Validation]
+    SecurityConfig --> SecurityValidation[Whitelist/Read-Only Validation]
     MiningConfig --> MiningValidation[Difficulty Validation]
 ```
 
@@ -267,6 +268,7 @@ graph TB
 
 ### 1. Request Validation
 - **Method Whitelist**: Only allowed RPC methods are processed via SecurityConfig
+- **Read-Only Mode**: When enabled, blocks all write operations (eth_sendRawTransaction, personal_*, admin_*)
 - **Input Validation**: All input parameters are validated
 - **Gas Price Enforcement**: Minimum gas price floor enforcement on eth_gasPrice
 

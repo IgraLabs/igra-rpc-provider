@@ -83,6 +83,10 @@ pub enum AppError {
     /// Error indicates retry attempts have been exhausted.
     #[error("Retry exhausted after {attempts} attempts: {reason}")]
     RetryExhausted { attempts: u32, reason: String },
+
+    /// Error indicates that a write operation was attempted in read-only mode.
+    #[error("Read-only mode is enabled")]
+    ReadOnlyMode,
 }
 
 // Add conversion from WalletError to AppError
@@ -165,6 +169,10 @@ impl AppError {
             AppError::RetryExhausted { attempts, reason } => (
                 -32015,
                 format!("Retry exhausted after {} attempts: {}", attempts, reason),
+            ),
+            AppError::ReadOnlyMode => (
+                -32000,
+                "Read-only mode is enabled".to_string(),
             ),
         };
 
@@ -350,5 +358,20 @@ mod tests {
         assert!(message.contains("Transaction fee is too low"));
         assert!(message.contains("100000000000 wei"));
         assert!(message.contains("50000000000 wei"));
+    }
+
+    #[test]
+    fn test_read_only_mode_error() {
+        let error = AppError::ReadOnlyMode;
+        assert!(matches!(error, AppError::ReadOnlyMode));
+
+        let json_error = error.to_json_rpc_error(json!(1));
+        assert_eq!(json_error["error"]["code"], -32000);
+        assert_eq!(
+            json_error["error"]["message"]
+                .as_str()
+                .expect("Error message should be a string"),
+            "Read-only mode is enabled"
+        );
     }
 }
