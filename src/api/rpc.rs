@@ -1,42 +1,73 @@
 use crate::{
     error::AppError,
     services::transaction,
-    types::{rpc::RpcRequest, whitelist},
+    types::{
+        rpc::{RpcEnvelope, RpcRequest},
+        whitelist,
+    },
     AppState,
 };
 use axum::{
     extract::{Json, State},
     response::IntoResponse,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{error, info, warn};
 
 /// Handles JSON-RPC requests and routes them to the appropriate handler.
-/// Focuses solely on HTTP request/response handling and delegates business logic to services.
+/// Supports both single and batch requests, delegating business logic to services.
 pub async fn handle_rpc(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<RpcRequest>,
+    Json(envelope): Json<RpcEnvelope>,
 ) -> impl IntoResponse {
-    let request_context = RequestContext::new(&req);
+    match envelope {
+        RpcEnvelope::Single(req) => Json(process_single_request(&state, req).await),
+        RpcEnvelope::Batch(mut requests) => {
+            if requests.is_empty() {
+                // JSON-RPC 2.0: empty batch is an invalid request; return single error object
+                return Json(json_rpc_error(
+                    Value::Null,
+                    -32600,
+                    "Invalid Request: empty batch",
+                ));
+            }
 
-    // Log incoming request
+            let mut responses = Vec::with_capacity(requests.len());
+            for req in requests.drain(..) {
+                let value = process_single_request(&state, req).await;
+                responses.push(value);
+            }
+
+            Json(Value::Array(responses))
+        }
+    }
+}
+
+/// Process a single JSON-RPC request through validation, routing, and logging, returning the response value.
+async fn process_single_request(state: &Arc<AppState>, req: RpcRequest) -> Value {
+    let request_context = RequestContext::new(&req);
     log_incoming_request(&request_context);
 
-    // Validate request authorization
-    if let Some(error_response) = validate_request_authorization(&state, &req, &request_context) {
-        return error_response;
+    if let Some(error_response) = validate_request_authorization(state, &req, &request_context) {
+        return error_response.0;
     }
 
-    // Route request to appropriate service and measure performance
     let start_time = Instant::now();
-    let result = route_request_to_service(&state, req, &request_context).await;
+    let result = route_request_to_service(state, req, &request_context).await;
     let duration = start_time.elapsed();
-
-    // Log response and return
     log_response(&request_context, &result, duration);
-    Json(result)
+    result
+}
+
+/// Helper to construct a JSON-RPC error object
+fn json_rpc_error(id: Value, code: i32, message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "error": { "code": code, "message": message },
+        "id": id
+    })
 }
 
 /// Context information for request processing and logging

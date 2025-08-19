@@ -20,6 +20,17 @@ pub struct RpcRequest {
     pub id: Value,
 }
 
+/// Envelope that accepts either a single JSON-RPC request object or a batch (array) of requests.
+///
+/// Using untagged deserialization allows serde to choose the variant based on the JSON shape
+/// (object vs array), which matches JSON-RPC 2.0 behavior for single vs batch requests.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RpcEnvelope {
+    Single(RpcRequest),
+    Batch(Vec<RpcRequest>),
+}
+
 /// Represents the type of an IGRA L2 transaction.
 ///
 /// This enum is used in the L1 payload to identify the kind of L2 data being transmitted.
