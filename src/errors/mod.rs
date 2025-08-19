@@ -61,6 +61,8 @@ impl ToJsonRpcError for TransactionError {
             TransactionError::AlreadyExists { .. } => -32000, // Server error
             TransactionError::TransactionExpired { .. } => -32000, // Server error
             TransactionError::InternalError(_) => -32603,  // Internal error
+            TransactionError::InvalidTransactionFormat(_) => -32602, // Invalid params
+            TransactionError::InsufficientGasFee { .. } => -32602, // Invalid params
         }
     }
 }

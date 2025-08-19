@@ -85,6 +85,14 @@ pub enum TransactionError {
     /// Internal processing error
     #[error("Internal transaction processing error: {0}")]
     InternalError(String),
+
+    /// Invalid transaction format (missing fields or unsupported types)
+    #[error("Invalid transaction format: {0}")]
+    InvalidTransactionFormat(String),
+
+    /// Insufficient gas fee for protocol requirements
+    #[error("Insufficient gas fee: required {required} wei, provided {provided} wei")]
+    InsufficientGasFee { required: String, provided: String },
 }
 
 impl TransactionError {
@@ -160,6 +168,29 @@ impl TransactionError {
         }
     }
 
+    /// Create an invalid transaction format error
+    pub fn invalid_transaction_format(reason: impl Into<String>) -> Self {
+        Self::InvalidTransactionFormat(reason.into())
+    }
+
+    /// Create an insufficient gas fee error
+    pub fn insufficient_gas_fee(required: impl Into<String>, provided: impl Into<String>) -> Self {
+        Self::InsufficientGasFee {
+            required: required.into(),
+            provided: provided.into(),
+        }
+    }
+
+    /// Create a decoding failed error
+    pub fn decoding_failed(reason: impl Into<String>) -> Self {
+        Self::DecodingFailed(reason.into())
+    }
+
+    /// Create a validation failed error  
+    pub fn validation_failed(reason: impl Into<String>) -> Self {
+        Self::ValidationFailed(reason.into())
+    }
+
     /// Check if this error is retryable
     pub fn is_retryable(&self) -> bool {
         matches!(
@@ -188,6 +219,9 @@ impl TransactionError {
                 | TransactionError::InvalidFormat(_)
                 | TransactionError::InsufficientFunds { .. }
                 | TransactionError::SignatureVerificationFailed(_)
+                | TransactionError::InvalidTransactionFormat(_)
+                | TransactionError::InsufficientGasFee { .. }
+                | TransactionError::DecodingFailed(_)
         )
     }
 
@@ -213,6 +247,8 @@ impl TransactionError {
             TransactionError::InsufficientFunds { .. } => "INSUFFICIENT_FUNDS",
             TransactionError::SignatureVerificationFailed(_) => "SIGNATURE_VERIFICATION_FAILED",
             TransactionError::InternalError(_) => "INTERNAL_ERROR",
+            TransactionError::InvalidTransactionFormat(_) => "INVALID_TRANSACTION_FORMAT",
+            TransactionError::InsufficientGasFee { .. } => "INSUFFICIENT_GAS_FEE",
         }
     }
 }
@@ -259,5 +295,25 @@ mod tests {
         assert!(error.is_validation_error());
         assert!(!error.is_retryable());
         assert_eq!(error.error_code(), "INSUFFICIENT_FUNDS");
+    }
+
+    #[test]
+    fn test_invalid_transaction_format_error() {
+        let error =
+            TransactionError::invalid_transaction_format("Missing max_priority_fee_per_gas");
+        assert!(error.is_validation_error());
+        assert!(!error.is_retryable());
+        assert_eq!(error.error_code(), "INVALID_TRANSACTION_FORMAT");
+        assert!(error.to_string().contains("Invalid transaction format"));
+    }
+
+    #[test]
+    fn test_insufficient_gas_fee_error() {
+        let error = TransactionError::insufficient_gas_fee("2000000000000", "1000000000");
+        assert!(error.is_validation_error());
+        assert!(!error.is_retryable());
+        assert_eq!(error.error_code(), "INSUFFICIENT_GAS_FEE");
+        assert!(error.to_string().contains("required 2000000000000 wei"));
+        assert!(error.to_string().contains("provided 1000000000 wei"));
     }
 }

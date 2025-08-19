@@ -525,10 +525,10 @@ impl From<WalletCallerError> for crate::error::AppError {
     fn from(err: WalletCallerError) -> Self {
         match err {
             WalletCallerError::ConnectionFailed(e) => {
-                crate::error::AppError::WalletError(format!("Connection failed: {}", e))
+                crate::error::AppError::WalletError(format!("Connection failed: {e}"))
             }
             WalletCallerError::AddressGenerationFailed(e) => {
-                crate::error::AppError::WalletError(format!("Address generation failed: {}", e))
+                crate::error::AppError::WalletError(format!("Address generation failed: {e}"))
             }
             WalletCallerError::PasswordNotSet => {
                 crate::error::AppError::WalletError("Password not set".to_string())
@@ -541,17 +541,14 @@ impl From<WalletCallerError> for crate::error::AppError {
                 if WalletCaller::is_no_funds_error(e.as_ref()) {
                     crate::error::AppError::UtxoExhausted
                 } else {
-                    crate::error::AppError::WalletError(format!(
-                        "Transaction creation failed: {}",
-                        e
-                    ))
+                    crate::error::AppError::WalletError(format!("Transaction creation failed: {e}"))
                 }
             }
             WalletCallerError::TransactionSigningFailed(e) => {
-                crate::error::AppError::WalletError(format!("Transaction signing failed: {}", e))
+                crate::error::AppError::WalletError(format!("Transaction signing failed: {e}"))
             }
             WalletCallerError::TransactionBroadcastFailed(e) => {
-                crate::error::AppError::WalletError(format!("Transaction broadcast failed: {}", e))
+                crate::error::AppError::WalletError(format!("Transaction broadcast failed: {e}"))
             }
             WalletCallerError::MiningFailed(e) => e,
             WalletCallerError::NoTransactionIds => {
@@ -564,7 +561,7 @@ impl From<WalletCallerError> for crate::error::AppError {
                 crate::error::AppError::transaction_codec_error("encode", &e)
             }
             WalletCallerError::TransactionExtractionFailed(e) => {
-                crate::error::AppError::WalletError(format!("Transaction extraction failed: {}", e))
+                crate::error::AppError::WalletError(format!("Transaction extraction failed: {e}"))
             }
         }
     }

@@ -78,12 +78,7 @@ pub fn validate_all_configs<T: ConfigValidation>(configs: &[T]) -> Result<(), Ve
     let errors: Vec<String> = configs
         .iter()
         .enumerate()
-        .filter_map(|(i, config)| {
-            config
-                .validate()
-                .err()
-                .map(|e| format!("Config {}: {}", i, e))
-        })
+        .filter_map(|(i, config)| config.validate().err().map(|e| format!("Config {i}: {e}")))
         .collect();
 
     if errors.is_empty() {
@@ -123,15 +118,18 @@ mod tests {
 
     #[test]
     fn test_validate_all_configs_success() {
-        let configs = vec![GasConfig::new(), GasConfig::with_min_base_fee_gwei(50)];
+        let configs = vec![
+            GasConfig::new(),
+            GasConfig::with_min_protocol_fee_per_gas_gwei(50),
+        ];
         assert!(validate_all_configs(&configs).is_ok());
     }
 
     #[test]
     fn test_validate_all_configs_failure() {
         let configs = vec![
-            GasConfig::with_min_base_fee_gwei(50), // Valid
-            GasConfig::with_min_base_fee_gwei(0),  // Invalid - zero
+            GasConfig::with_min_protocol_fee_per_gas_gwei(50), // Valid
+            GasConfig::with_min_protocol_fee_per_gas_gwei(0),  // Invalid - zero
         ];
         let result = validate_all_configs(&configs);
         assert!(result.is_err());

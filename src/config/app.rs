@@ -67,7 +67,10 @@ impl AppConfig {
             ("MINING_REQUIRED_PREFIX", "mining.required_prefix"),
             ("MINING_TIMEOUT_SECONDS", "mining.timeout_seconds"),
             // Gas configuration
-            ("GAS_MIN_BASE_FEE_GWEI", "gas.min_base_fee_gwei"),
+            (
+                "MIN_PROTOCOL_FEE_PER_GAS_GWEI",
+                "gas.min_protocol_fee_per_gas_gwei",
+            ),
             // Retry configuration
             ("RETRY_MAX_ATTEMPTS", "retry.max_attempts"),
             ("RETRY_INITIAL_DELAY_MS", "retry.initial_delay_ms"),
@@ -104,37 +107,37 @@ impl AppConfig {
         config
             .server
             .validate()
-            .map_err(|e| AppError::ConfigError(format!("Server config: {}", e)))?;
+            .map_err(|e| AppError::ConfigError(format!("Server config: {e}")))?;
 
         config
             .proxy
             .validate()
-            .map_err(|e| AppError::ConfigError(format!("Proxy config: {}", e)))?;
+            .map_err(|e| AppError::ConfigError(format!("Proxy config: {e}")))?;
 
         config
             .wallet
             .validate()
-            .map_err(|e| AppError::ConfigError(format!("Wallet config: {}", e)))?;
+            .map_err(|e| AppError::ConfigError(format!("Wallet config: {e}")))?;
 
         config
             .security
             .validate()
-            .map_err(|e| AppError::ConfigError(format!("Security config: {}", e)))?;
+            .map_err(|e| AppError::ConfigError(format!("Security config: {e}")))?;
 
         config
             .mining
             .validate()
-            .map_err(|e| AppError::ConfigError(format!("Mining config: {}", e)))?;
+            .map_err(|e| AppError::ConfigError(format!("Mining config: {e}")))?;
 
         config
             .gas
             .validate()
-            .map_err(|e| AppError::ConfigError(format!("Gas config: {}", e)))?;
+            .map_err(|e| AppError::ConfigError(format!("Gas config: {e}")))?;
 
         config
             .retry
             .validate()
-            .map_err(|e| AppError::ConfigError(format!("Retry config: {}", e)))?;
+            .map_err(|e| AppError::ConfigError(format!("Retry config: {e}")))?;
 
         Ok(())
     }

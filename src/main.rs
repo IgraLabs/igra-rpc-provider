@@ -25,7 +25,7 @@ async fn main() -> Result<(), AppError> {
     let config = match AppConfig::load() {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("Failed to load configuration: {}", e);
+            eprintln!("Failed to load configuration: {e}");
             process::exit(1);
         }
     };
@@ -68,7 +68,7 @@ async fn main() -> Result<(), AppError> {
         AppState::new(config, transaction_sender, wallet_caller, proxy_service)
             .await
             .unwrap_or_else(|e| {
-                eprintln!("Failed to create application state: {}", e);
+                eprintln!("Failed to create application state: {e}");
                 process::exit(1);
             }),
     );
@@ -84,7 +84,7 @@ async fn main() -> Result<(), AppError> {
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => listener,
         Err(e) => {
-            eprintln!("Failed to bind to address {}: {}", addr, e);
+            eprintln!("Failed to bind to address {addr}: {e}");
             process::exit(1);
         }
     };
@@ -93,7 +93,7 @@ async fn main() -> Result<(), AppError> {
 
     // Start the server using the Axum framework
     if let Err(e) = axum::serve(listener, app.into_make_service()).await {
-        eprintln!("Server failed: {}", e);
+        eprintln!("Server failed: {e}");
         process::exit(1);
     }
 

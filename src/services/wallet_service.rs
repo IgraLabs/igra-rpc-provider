@@ -168,8 +168,7 @@ impl WalletService {
                 error!("WALLET_SERVICE: Mined transaction failed: {}", e);
 
                 Err(WalletServiceError::TransactionFailed(format!(
-                    "Mining and sending failed: {}",
-                    e
+                    "Mining and sending failed: {e}"
                 )))
             }
         }

@@ -64,7 +64,7 @@ impl AppServices {
 
         // Create wallet service
         let wallet_service = Arc::new(WalletService::new(config.wallet.clone()).await.map_err(
-            |e| crate::error::AppError::Internal(format!("Failed to create wallet service: {}", e)),
+            |e| crate::error::AppError::Internal(format!("Failed to create wallet service: {e}")),
         )?);
 
         // Create transaction processor

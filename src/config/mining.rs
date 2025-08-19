@@ -54,7 +54,7 @@ impl MiningConfig {
             return Err("Hex prefix must have even number of characters".to_string());
         }
 
-        hex::decode(clean_hex).map_err(|e| format!("Invalid hex prefix: {}", e))
+        hex::decode(clean_hex).map_err(|e| format!("Invalid hex prefix: {e}"))
     }
 
     /// Validates the mining configuration parameters

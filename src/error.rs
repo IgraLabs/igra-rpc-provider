@@ -94,10 +94,10 @@ impl From<KaspaWalletError> for AppError {
     fn from(err: KaspaWalletError) -> Self {
         match err {
             KaspaWalletError::UserInputError(msg) => {
-                AppError::WalletError(format!("User input error: {}", msg))
+                AppError::WalletError(format!("User input error: {msg}"))
             }
             KaspaWalletError::InternalServerError(msg) => {
-                AppError::WalletError(format!("Internal server error: {}", msg))
+                AppError::WalletError(format!("Internal server error: {msg}"))
             }
         }
     }
@@ -113,54 +113,53 @@ impl AppError {
     /// A `serde_json::Value` object representing the JSON-RPC error response.
     pub fn to_json_rpc_error(&self, id: Value) -> Value {
         let (code, message) = match self {
-            AppError::ConfigError(s) => (-32000, format!("Configuration error: {}", s)),
+            AppError::ConfigError(s) => (-32000, format!("Configuration error: {s}")),
             AppError::InvalidTransactionFormat => {
                 (-32001, "Invalid L2 transaction format".to_string())
             }
             AppError::ElCallError(_) => (-32000, "IGRA EL Client call failed".to_string()),
             AppError::WalletCallError => (-32005, "KASPA Wallet call failed".to_string()),
             AppError::MethodNotAllowed(method) => {
-                (-32002, format!("RPC method not allowed: {}", method))
+                (-32002, format!("RPC method not allowed: {method}"))
             }
             AppError::InvalidPayload(reason) => {
-                (-32003, format!("Invalid IGRA payload: {}", reason))
+                (-32003, format!("Invalid IGRA payload: {reason}"))
             }
             AppError::SerializationError(reason) => {
-                (-32004, format!("Payload serialization error: {}", reason))
+                (-32004, format!("Payload serialization error: {reason}"))
             }
             AppError::MiningTimeout { timeout_seconds } => (
                 -32007,
                 format!(
-                    "Transaction mining timeout after {} seconds",
-                    timeout_seconds
+                    "Transaction mining timeout after {timeout_seconds} seconds"
                 ),
             ),
             AppError::NonceExhaustion { nonces_tried } => (
                 -32008,
-                format!("Transaction mining exhausted {} nonces", nonces_tried),
+                format!("Transaction mining exhausted {nonces_tried} nonces"),
             ),
             AppError::TransactionCodecError { operation, reason } => (
                 -32009,
-                format!("Transaction codec {} failed: {}", operation, reason),
+                format!("Transaction codec {operation} failed: {reason}"),
             ),
             AppError::MiningError(reason) => {
-                (-32006, format!("Transaction mining error: {}", reason))
+                (-32006, format!("Transaction mining error: {reason}"))
             }
             AppError::MiningConfigError(reason) => {
-                (-32010, format!("Mining configuration error: {}", reason))
+                (-32010, format!("Mining configuration error: {reason}"))
             }
             AppError::MiningInvalidState(reason) => (
                 -32011,
-                format!("Mining invalid transaction state: {}", reason),
+                format!("Mining invalid transaction state: {reason}"),
             ),
-            AppError::WalletError(reason) => (-32012, format!("Wallet error: {}", reason)),
+            AppError::WalletError(reason) => (-32012, format!("Wallet error: {reason}")),
             AppError::JsonRpcError(json_error) => {
-                (-32000, format!("JSON-RPC error: {}", json_error))
+                (-32000, format!("JSON-RPC error: {json_error}"))
             }
-            AppError::Internal(reason) => (-32000, format!("Internal error: {}", reason)),
+            AppError::Internal(reason) => (-32000, format!("Internal error: {reason}")),
             AppError::InsufficientGasFee { required, provided } => (
                 -32000,
-                format!("Transaction fee is too low. Required base fee: {} wei, transaction max fee: {} wei", required, provided),
+                format!("Transaction fee is too low. Required base fee: {required} wei, transaction max fee: {provided} wei"),
             ),
             AppError::UtxoExhausted => (
                 -32014,
@@ -168,7 +167,7 @@ impl AppError {
             ),
             AppError::RetryExhausted { attempts, reason } => (
                 -32015,
-                format!("Retry exhausted after {} attempts: {}", attempts, reason),
+                format!("Retry exhausted after {attempts} attempts: {reason}"),
             ),
             AppError::ReadOnlyMode => (
                 -32000,

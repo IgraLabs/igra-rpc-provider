@@ -9,12 +9,13 @@ el_url = "http://execution-layer:8545"
 wallet_daemon_uri = "http://kaswallet:8082"
 to_address = "kaspatest:qpv8hxvmtvu0tjruup8y5ggqnx9qt5cre32vxrk8073v28w94g99xt57cy60h"
 
+
 [security]
 enable_whitelist = true
 read_only = false
 
 [gas]
-min_base_fee_gwei = 100
+min_protocol_fee_per_gas_gwei = 100
 
 [mining]
 # Required prefix for mined transaction IDs (default: [0x97, 0xb1])
