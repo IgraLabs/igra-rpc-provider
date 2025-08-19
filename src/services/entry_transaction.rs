@@ -183,14 +183,12 @@ pub mod validation {
         let amount_sompi = try_kaspa_str_to_sompi(trimmed)
             .map_err(|e| {
                 EntryTransactionError::Validation(format!(
-                    "Invalid amount '{}': {}. Expected a valid KAS amount (e.g., 1.5)",
-                    trimmed, e
+                    "Invalid amount '{trimmed}': {e}. Expected a valid KAS amount (e.g., 1.5)"
                 ))
             })?
             .ok_or_else(|| {
                 EntryTransactionError::Validation(format!(
-                    "Invalid amount '{}'. Expected a valid KAS amount (e.g., 1.5)",
-                    trimmed
+                    "Invalid amount '{trimmed}'. Expected a valid KAS amount (e.g., 1.5)"
                 ))
             })?;
 
@@ -202,8 +200,7 @@ pub mod validation {
 
         if amount_sompi > MAX_REASONABLE_SOMPI {
             return Err(EntryTransactionError::Validation(format!(
-                "Amount {} SOMPI exceeds maximum possible KAS emission ({} KAS)",
-                amount_sompi, MAX_KAS_EMISSION
+                "Amount {amount_sompi} SOMPI exceeds maximum possible KAS emission ({MAX_KAS_EMISSION} KAS)"
             )));
         }
 
@@ -225,8 +222,7 @@ pub mod validation {
         // See issue: https://github.com/IgraLabs/rusty-kaspa/issues/XX
         std::panic::catch_unwind(|| Address::constructor(trimmed)).map_err(|_| {
             EntryTransactionError::Validation(format!(
-                "Invalid Kaspa address '{}'. Expected format: kaspa:qpam...",
-                trimmed
+                "Invalid Kaspa address '{trimmed}'. Expected format: kaspa:qpam..."
             ))
         })
     }
@@ -258,8 +254,7 @@ pub mod validation {
         let mut address_bytes = [0u8; ETHEREUM_ADDRESS_SIZE];
         hex::decode_to_slice(hex_str, &mut address_bytes).map_err(|_| {
             EntryTransactionError::Validation(format!(
-                "Invalid hex characters in Ethereum address '{}'",
-                hex_str
+                "Invalid hex characters in Ethereum address '{hex_str}'"
             ))
         })?;
 

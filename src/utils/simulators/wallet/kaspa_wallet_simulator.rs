@@ -46,11 +46,11 @@ async fn main() {
     match send_raw_transaction(&args.rpc_url, &args.raw_tx).await {
         Ok(response) => {
             info!("Transaction succeeded: {}", response);
-            println!("Success: {}", response);
+            println!("Success: {response}");
         }
         Err(err) => {
             info!("Transaction failed: {}", err);
-            eprintln!("Error: {}", err);
+            eprintln!("Error: {err}");
         }
     }
 }
@@ -76,14 +76,14 @@ async fn send_raw_transaction(rpc_url: &str, raw_tx: &str) -> Result<String, Str
         .send()
         .await
         .map_err(|e| {
-            let error_message = format!("Failed to send request: {}", e);
+            let error_message = format!("Failed to send request: {e}");
             info!("{}", error_message);
             error_message
         })?;
 
     let status = response.status();
     let response_text = response.text().await.map_err(|e| {
-        let error_message = format!("Failed to read response: {}", e);
+        let error_message = format!("Failed to read response: {e}");
         info!("{}", error_message);
         error_message
     })?;
@@ -105,7 +105,7 @@ async fn send_raw_transaction(rpc_url: &str, raw_tx: &str) -> Result<String, Str
 
     info!("Parsing JSON-RPC response...");
     let json_response: serde_json::Value = serde_json::from_str(&response_text).map_err(|e| {
-        let error_message = format!("Failed to parse response JSON: {}", e);
+        let error_message = format!("Failed to parse response JSON: {e}");
         info!("{}", error_message);
         error_message
     })?;
@@ -115,7 +115,7 @@ async fn send_raw_transaction(rpc_url: &str, raw_tx: &str) -> Result<String, Str
         debug!("Parsed result from response: {}", result);
         Ok(result.to_string())
     } else if let Some(error) = json_response.get("error") {
-        let error_message = format!("RPC error: {}", error);
+        let error_message = format!("RPC error: {error}");
         info!("{}", error_message);
         Err(error_message)
     } else {

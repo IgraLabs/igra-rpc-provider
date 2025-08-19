@@ -130,30 +130,30 @@ impl App {
         let kas_amount = request.amount_sompi as f64 / SOMPI_PER_KASPA as f64;
 
         println!("✅ Entry transaction sent successfully!");
-        println!("   Transaction ID: {}", tx_id);
+        println!("   Transaction ID: {tx_id}");
         println!("   Recipient: {}", request.recipient);
         println!(
             "   Amount: {:.8} KAS ({} SOMPI)",
             kas_amount, request.amount_sompi
         );
         println!("   L2 Address: 0x{}", hex::encode(request.l2_address));
-        println!("   Processing time: {:?}", duration);
+        println!("   Processing time: {duration:?}");
     }
 
     fn handle_error(error: EntryTransactionError) -> ! {
         let exit_code = match &error {
             EntryTransactionError::Validation(_) => {
-                eprintln!("❌ {}", error);
+                eprintln!("❌ {error}");
                 eprintln!("Use --help for usage information.");
                 ExitCode::ValidationError
             }
             EntryTransactionError::Config(_) => {
-                eprintln!("❌ {}", error);
+                eprintln!("❌ {error}");
                 eprintln!("Please check your config.toml file.");
                 ExitCode::ConfigError
             }
             EntryTransactionError::Wallet(_) | EntryTransactionError::Serialization(_) => {
-                eprintln!("❌ {}", error);
+                eprintln!("❌ {error}");
                 ExitCode::WalletError
             }
         };

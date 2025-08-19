@@ -458,8 +458,7 @@ impl TransactionMiner {
                     "Mining blocking task failed"
                 );
                 Err(AppError::mining_invalid_state(&format!(
-                    "Mining task failed: {}",
-                    e
+                    "Mining task failed: {e}"
                 )))
             }
         }
@@ -980,7 +979,7 @@ mod tests {
                 // This is still a valid outcome, just very rare
             }
             Err(other) => {
-                panic!("Expected MiningTimeout or success, got: {:?}", other);
+                panic!("Expected MiningTimeout or success, got: {other:?}");
             }
         }
     }
@@ -1071,10 +1070,7 @@ mod tests {
                 let tolerance = expected_rate * 0.01; // 1% tolerance
                 assert!(
                     (actual_rate - expected_rate).abs() <= tolerance.max(1.0),
-                    "Expected rate: {}, Actual rate: {}, Tolerance: {}",
-                    expected_rate,
-                    actual_rate,
-                    tolerance
+                    "Expected rate: {expected_rate}, Actual rate: {actual_rate}, Tolerance: {tolerance}"
                 );
             } else {
                 assert_eq!(stats.hashes_per_second, 0.0);
@@ -1137,7 +1133,7 @@ mod tests {
                     // Timeout is acceptable for difficult prefixes
                 }
                 Err(other) => {
-                    panic!("Unexpected error: {:?}", other);
+                    panic!("Unexpected error: {other:?}");
                 }
             }
         }
@@ -1307,7 +1303,7 @@ mod tests {
             } => {
                 // Expected
             }
-            _ => panic!("Expected MiningTimeout variant, got: {:?}", app_error),
+            _ => panic!("Expected MiningTimeout variant, got: {app_error:?}"),
         }
     }
 
@@ -1322,7 +1318,7 @@ mod tests {
             } => {
                 // Expected
             }
-            _ => panic!("Expected NonceExhaustion variant, got: {:?}", app_error),
+            _ => panic!("Expected NonceExhaustion variant, got: {app_error:?}"),
         }
     }
 

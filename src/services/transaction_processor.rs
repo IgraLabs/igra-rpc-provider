@@ -45,7 +45,7 @@ impl TransactionProcessor {
     /// Process a single transaction request
     pub async fn process_transaction(&mut self, tx_request: TransactionRequest) {
         let tx_hash = compute_transaction_hash(&tx_request.tx_bytes);
-        let tx_hash_str = format!("{:#x}", tx_hash);
+        let tx_hash_str = format!("{tx_hash:#x}");
 
         // Generate a proper ID string, using UUID if the original ID is null or invalid
         let id_str = if tx_request.id.is_null() {
@@ -90,7 +90,7 @@ impl TransactionProcessor {
                     "TX_PROCESSOR [id={}, hash={}]: Failed to fetch base fee: {}. Rejecting transaction.",
                     id_str, tx_hash_str, e
                 );
-                self.handle_error(&tx_request, format!("Failed to fetch base fee: {}", e))
+                self.handle_error(&tx_request, format!("Failed to fetch base fee: {e}"))
                     .await;
                 return;
             }
@@ -131,7 +131,7 @@ impl TransactionProcessor {
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Parse the transaction for validation
         let tx: Transaction = rlp::decode(&tx_request.tx_bytes)
-            .map_err(|e| format!("Failed to decode transaction: {}", e))?;
+            .map_err(|e| format!("Failed to decode transaction: {e}"))?;
 
         info!(
             "TX_PROCESSOR [id={}, hash={}]: Processing transaction with gas validation",
@@ -199,11 +199,9 @@ impl TransactionProcessor {
         };
 
         if !is_valid {
-            return Err(format!(
-                "Gas price validation failed for transaction {}",
-                tx_hash_str
-            )
-            .into());
+            return Err(
+                format!("Gas price validation failed for transaction {tx_hash_str}").into(),
+            );
         }
 
         Ok(())
@@ -218,7 +216,7 @@ impl TransactionProcessor {
             .response_sender
             .send(Ok(()))
             .await
-            .map_err(|e| format!("Failed to send response: {}", e))?;
+            .map_err(|e| format!("Failed to send response: {e}"))?;
         Ok(())
     }
 
