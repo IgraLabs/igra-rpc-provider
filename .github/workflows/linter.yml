@@ -21,7 +21,9 @@ jobs:
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
           echo "RUSTUP_HOME=$HOME/.rustup" >> $GITHUB_ENV
-          echo "Using rustc: $(rustc +stable --version)"
+          # Install the toolchain specified in rust-toolchain.toml
+          rustup show
+          echo "Using rustc: $(rustc --version)"
 
       - name: Cache cargo dependencies
         uses: actions/cache@v4
@@ -37,12 +39,12 @@ jobs:
             ${{ runner.os }}-lint-
 
       - name: Check formatting
-        run: cargo +stable fmt -- --check
+        run: cargo fmt -- --check
 
       - name: Run clippy
         run: |
           export CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/target-${GITHUB_JOB}"
-          cargo +stable clippy --all-targets --all-features -- -D warnings
+          cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run typos
         run: typos
