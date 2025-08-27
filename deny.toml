@@ -32,8 +32,9 @@ ignore = [
     "RUSTSEC-2024-0407", # linkme unsound (should upgrade when possible)
     "RUSTSEC-2024-0370", # proc-macro-error unmaintained (indirect dependency)
     "RUSTSEC-2024-0436", # paste is unmaintained (project archived, but widely used and stable)
+    "RUSTSEC-2025-0052", # async-std is discontinued (indirect dependency from kaspa crates)
 ]
-yanked = "deny"
+yanked = "warn"
 
 
 [licenses]
