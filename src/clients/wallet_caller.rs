@@ -237,7 +237,7 @@ impl WalletCaller {
             payload: transaction_params.payload,
             from_addresses: vec![],
             utxos: vec![],
-            use_existing_change_address: false,
+            use_existing_change_address: true,
             fee_policy: None,
         });
 
