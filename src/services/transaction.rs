@@ -494,7 +494,7 @@ fn extract_raw_transaction(req: &RpcRequest, id: &str) -> Result<String, Value> 
 /// Decodes hex string to transaction bytes with proper validation
 fn decode_hex_transaction(raw_tx: &str, id: &str) -> Result<Vec<u8>, Value> {
     // Remove "0x" prefix and pad with leading zero if the length is odd
-    let hex_str = if raw_tx.len() % 2 != 0 {
+    let hex_str = if !raw_tx.len().is_multiple_of(2) {
         debug!("TX_VALIDATE [id={}]: Odd-length hex string, padding", id);
         format!("0{}", &raw_tx[2..])
     } else {

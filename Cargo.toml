@@ -16,7 +16,11 @@ clap = { version = "4.5.35", features = ["derive"] }
 config = "0.15.11"
 ethers = "2.0.14"
 flate2 = "1.1.0"
+hdrhistogram = "7"
 hex = "0.4"
+humantime = "2.1"
+anyhow = "1.0"
+regex = "1"
 kaspa-addresses = { git = "https://github.com/IgraLabs/rusty-kaspa.git", branch = "for-wallet" }
 kaspa-bip32 = { git = "https://github.com/IgraLabs/rusty-kaspa.git", branch = "for-wallet" }
 kaspa-consensus-core = { git = "https://github.com/IgraLabs/rusty-kaspa.git", branch = "for-wallet" }
@@ -70,3 +74,7 @@ path = "src/utils/simulators/wallet/kaspa_wallet_simulator.rs"
 [[bin]]
 name = "entry_transaction_sender"
 path = "src/bin/entry_transaction_sender.rs"
+
+[[bin]]
+name = "tx_perf"
+path = "src/bin/tx_perf.rs"

@@ -12,7 +12,7 @@ It replaces the conventional RPC Provider (e.g., a local EVM node or a service l
 
 IGRA is an EVM-compatible Layer 2 whose state is entirely defined by the Base Layer — KASPA DAG — through its transaction history. Because of this dependency:
 
-- L2 transactions cannot be sent directly to the IGRA EL Client. Instead, they must first be included in an L1 transaction on the Base Layer (KASPA).  
+- L2 transactions cannot be sent directly to the IGRA EL Client. Instead, they must first be included in an L1 transaction on the Base Layer (KASPA).
 - Users send transactions via (the IGRA version of) the KASPA Wallet. When an L1 transaction containing the L2 payload is minted on the Base Layer, a component called **Viaduct** detects it. Viaduct then interacts with the **IGRA Block Builder**, which in turn communicates with the IGRA EL Client (essentially an IGRA version of the `reth` Ethereum EL node) to execute the L2 transaction and update its internal state.
 - Standard L2 wallets (e.g., MetaMask) typically interact with EVM nodes using the Ethereum JSON-RPC interface** for both reading data and sending transactions. However, in IGRA’s architecture, sending a transaction requires an additional step: the transaction must be relayed through the Base Layer.
 
@@ -46,14 +46,17 @@ Domain-specific configuration modules with comprehensive validation:
 ### 🔍 For Detailed Architecture Information
 See [Architecture Documentation](doc/architecture.md) for comprehensive diagrams, service interactions, design decisions, and implementation details.
 
+### 📈 Tx Performance CLI
+See `tx_perf` usage and examples in [doc/tx-perf-cli.md](doc/tx-perf-cli.md).
+
 ## Features
-✅ **Proxy Mode**: Transparently forwards "read-only" JSON-RPC requests (`eth_blockNumber`, `eth_getBalance`, etc.) to the IGRA EL client.  
+✅ **Proxy Mode**: Transparently forwards "read-only" JSON-RPC requests (`eth_blockNumber`, `eth_getBalance`, etc.) to the IGRA EL client.
 ✅ **Custom Handling for `eth_sendRawTransaction`**:
   - Calls the KASPA Wallet for transaction submission to the Base Layer (KASPA DAG).
-  - Returns transaction hash only if all checks pass and the transaction gets submitted.  
-✅ **Read-Only Mode**: When enabled via `READ_ONLY=true`, blocks all write operations (`eth_sendRawTransaction`, `personal_*`, `admin_*`).  
-✅ Structured Logging: Uses `tracing` for detailed logs.  
-✅ Error Handling: Mimics standard Ethereum JSON-RPC error responses.  
+  - Returns transaction hash only if all checks pass and the transaction gets submitted.
+✅ **Read-Only Mode**: When enabled via `READ_ONLY=true`, blocks all write operations (`eth_sendRawTransaction`, `personal_*`, `admin_*`).
+✅ Structured Logging: Uses `tracing` for detailed logs.
+✅ Error Handling: Mimics standard Ethereum JSON-RPC error responses.
 ---
 
 ## 🚀 Installation & Setup
@@ -127,7 +130,7 @@ It includes the following methods (the list is incomplete).
 {
   "jsonrpc": "2.0",
   "method": "eth_sendRawTransaction",
-  "params": ["0xf86b..."], 
+  "params": ["0xf86b..."],
   "id": 1
 }
 ```
@@ -157,7 +160,7 @@ cargo test
 ---
 
 ## ⚙️ Configuration
-The following environment variables can be used:  
+The following environment variables can be used:
 
 | Variable         | Description                          | Default                          |
 |------------------|--------------------------------------|----------------------------------|
@@ -242,7 +245,7 @@ You should receive a JSON response containing the block number.
 ---
 
 ## 🛠 Known Issues and Future Improvements
-- `wss:\\` protocol shall be supported for JSON-RPC requests. 
+- `wss:\\` protocol shall be supported for JSON-RPC requests.
 - Interface with KASPA Wallet needs to be improved.
 
 ---
