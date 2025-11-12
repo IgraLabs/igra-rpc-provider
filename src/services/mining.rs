@@ -612,12 +612,12 @@ impl TransactionMiner {
             }
 
             // Periodic progress logging with sampling to avoid log spam
-            if nonce % PROGRESS_LOG_INTERVAL == 0 && nonce > 0 {
+            if nonce.is_multiple_of(PROGRESS_LOG_INTERVAL) && nonce > 0 {
                 let elapsed = start_time.elapsed();
                 let rate = f64::from(nonce) / elapsed.as_secs_f64();
 
                 // Sample progress logs (every 10th interval to reduce volume)
-                if (nonce / PROGRESS_LOG_INTERVAL) % 10 == 0 {
+                if (nonce / PROGRESS_LOG_INTERVAL).is_multiple_of(10) {
                     let estimated_remaining = if rate > 0.0 {
                         Some(f64::from(u32::MAX - nonce) / rate)
                     } else {

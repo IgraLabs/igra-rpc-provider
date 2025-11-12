@@ -17,6 +17,7 @@ pub mod config;
 pub mod error;
 pub mod errors;
 pub mod services;
+pub mod tools;
 pub mod types;
 
 /// Application services container with clean dependency injection

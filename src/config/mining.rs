@@ -50,7 +50,7 @@ impl MiningConfig {
     pub fn parse_hex_prefix(hex_prefix: &str) -> Result<Vec<u8>, String> {
         let clean_hex = hex_prefix.strip_prefix("0x").unwrap_or(hex_prefix);
 
-        if clean_hex.len() % 2 != 0 {
+        if !clean_hex.len().is_multiple_of(2) {
             return Err("Hex prefix must have even number of characters".to_string());
         }
 
