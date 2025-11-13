@@ -21,9 +21,9 @@ jobs:
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
           echo "RUSTUP_HOME=$HOME/.rustup" >> $GITHUB_ENV
-          # Install the toolchain specified in rust-toolchain.toml
           rustup show
           echo "Using rustc: $(rustc --version)"
+          echo "Using cargo: $(cargo --version)"
 
       - name: Cache cargo dependencies
         uses: actions/cache@v4
