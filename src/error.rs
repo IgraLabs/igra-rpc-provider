@@ -1,4 +1,3 @@
-use ethers::types::U256;
 use serde_json::{json, Value};
 use thiserror::Error;
 
@@ -72,10 +71,6 @@ pub enum AppError {
     #[error("Internal error: {0}")]
     Internal(String),
 
-    /// Error indicates that a transaction's gas fee is insufficient.
-    #[error("Transaction fee is too low. Required base fee: {required} wei, transaction max fee: {provided} wei")]
-    InsufficientGasFee { required: U256, provided: U256 },
-
     /// Error indicates UTXO exhaustion (no funds to send).
     #[error("UTXO exhausted: no funds available to send")]
     UtxoExhausted,
@@ -122,17 +117,13 @@ impl AppError {
             AppError::MethodNotAllowed(method) => {
                 (-32002, format!("RPC method not allowed: {method}"))
             }
-            AppError::InvalidPayload(reason) => {
-                (-32003, format!("Invalid IGRA payload: {reason}"))
-            }
+            AppError::InvalidPayload(reason) => (-32003, format!("Invalid IGRA payload: {reason}")),
             AppError::SerializationError(reason) => {
                 (-32004, format!("Payload serialization error: {reason}"))
             }
             AppError::MiningTimeout { timeout_seconds } => (
                 -32007,
-                format!(
-                    "Transaction mining timeout after {timeout_seconds} seconds"
-                ),
+                format!("Transaction mining timeout after {timeout_seconds} seconds"),
             ),
             AppError::NonceExhaustion { nonces_tried } => (
                 -32008,
@@ -153,14 +144,8 @@ impl AppError {
                 format!("Mining invalid transaction state: {reason}"),
             ),
             AppError::WalletError(reason) => (-32012, format!("Wallet error: {reason}")),
-            AppError::JsonRpcError(json_error) => {
-                (-32000, format!("JSON-RPC error: {json_error}"))
-            }
+            AppError::JsonRpcError(json_error) => (-32000, format!("JSON-RPC error: {json_error}")),
             AppError::Internal(reason) => (-32000, format!("Internal error: {reason}")),
-            AppError::InsufficientGasFee { required, provided } => (
-                -32000,
-                format!("Transaction fee is too low. Required base fee: {required} wei, transaction max fee: {provided} wei"),
-            ),
             AppError::UtxoExhausted => (
                 -32014,
                 "UTXO exhausted: no funds available to send".to_string(),
@@ -169,10 +154,7 @@ impl AppError {
                 -32015,
                 format!("Retry exhausted after {attempts} attempts: {reason}"),
             ),
-            AppError::ReadOnlyMode => (
-                -32000,
-                "Read-only mode is enabled".to_string(),
-            ),
+            AppError::ReadOnlyMode => (-32000, "Read-only mode is enabled".to_string()),
         };
 
         json!({
@@ -211,11 +193,6 @@ impl AppError {
     /// Creates a mining invalid state error
     pub fn mining_invalid_state(reason: &str) -> Self {
         Self::MiningInvalidState(reason.to_string())
-    }
-
-    /// Creates an insufficient gas fee error
-    pub fn insufficient_gas_fee(required: U256, provided: U256) -> Self {
-        Self::InsufficientGasFee { required, provided }
     }
 }
 
@@ -335,28 +312,6 @@ mod tests {
             codec_error.to_string(),
             "Transaction codec error: encode failed - serialization failed"
         );
-    }
-
-    #[test]
-    fn test_insufficient_gas_fee_error() {
-        let required = U256::from(100_000_000_000_u64); // 100 Gwei
-        let provided = U256::from(50_000_000_000_u64); // 50 Gwei
-        let error = AppError::insufficient_gas_fee(required, provided);
-
-        assert!(matches!(
-            error,
-            AppError::InsufficientGasFee { required: req, provided: prov }
-            if req == U256::from(100_000_000_000_u64) && prov == U256::from(50_000_000_000_u64)
-        ));
-
-        let json_error = error.to_json_rpc_error(json!(1));
-        assert_eq!(json_error["error"]["code"], -32000);
-        let message = json_error["error"]["message"]
-            .as_str()
-            .expect("Error message should be a string");
-        assert!(message.contains("Transaction fee is too low"));
-        assert!(message.contains("100000000000 wei"));
-        assert!(message.contains("50000000000 wei"));
     }
 
     #[test]

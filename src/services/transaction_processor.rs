@@ -1,8 +1,10 @@
 use crate::config::AppConfig;
 use crate::services::gas_price::GasPriceService;
+use crate::services::transaction::{extract_gas_fees, GasFeeInfo};
 use crate::AppState;
-use ethers::types::{Transaction, H256, U256};
-use ethers::utils::{keccak256, rlp};
+use alloy::consensus::TxEnvelope;
+use alloy::primitives::{keccak256, B256, U256};
+use alloy::rlp::Decodable;
 use serde_json::Value;
 use std::error::Error;
 use std::sync::Arc;
@@ -130,7 +132,7 @@ impl TransactionProcessor {
         effective_base_fee: U256,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Parse the transaction for validation
-        let tx: Transaction = rlp::decode(&tx_request.tx_bytes)
+        let tx = TxEnvelope::decode(&mut &tx_request.tx_bytes[..])
             .map_err(|e| format!("Failed to decode transaction: {e}"))?;
 
         info!(
@@ -158,44 +160,50 @@ impl TransactionProcessor {
         Ok(())
     }
 
-    /// Validate gas price against effective base fee
+    /// Validate gas price against effective base fee.
+    /// Uses the consolidated extract_gas_fees helper from transaction.rs.
     fn validate_gas_price(
         &self,
-        tx: &Transaction,
+        tx: &TxEnvelope,
         effective_base_fee: U256,
         id_str: &str,
         tx_hash_str: &str,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // Validate gas price based on transaction type
-        let is_valid = if let (Some(max_fee), Some(max_priority_fee)) =
-            (tx.max_fee_per_gas, tx.max_priority_fee_per_gas)
-        {
-            // EIP-1559 transaction validation - for now, simple check
-            let is_fee_valid = max_fee >= effective_base_fee && max_priority_fee <= max_fee;
+        // Extract gas fees using consolidated helper
+        let gas_info = extract_gas_fees(tx).map_err(|e| {
+            error!("TX_PROCESSOR [id={}, hash={}]: {}", id_str, tx_hash_str, e);
+            e.to_string()
+        })?;
 
-            if !is_fee_valid {
-                warn!(
-                    "TX_PROCESSOR [id={}, hash={}]: EIP-1559 fee validation failed - max_fee: {}, max_priority_fee: {}, effective_base_fee: {}",
-                    id_str, tx_hash_str, max_fee, max_priority_fee, effective_base_fee
-                );
+        // Validate based on transaction type
+        let is_valid = match gas_info {
+            GasFeeInfo::Eip1559 {
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+            } => {
+                // EIP-1559: max_fee must cover base fee, priority fee must not exceed max_fee
+                let is_fee_valid = max_fee_per_gas >= effective_base_fee
+                    && max_priority_fee_per_gas <= max_fee_per_gas;
+
+                if !is_fee_valid {
+                    warn!(
+                        "TX_PROCESSOR [id={}, hash={}]: EIP-1559 fee validation failed - max_fee: {}, max_priority_fee: {}, effective_base_fee: {}",
+                        id_str, tx_hash_str, max_fee_per_gas, max_priority_fee_per_gas, effective_base_fee
+                    );
+                }
+                is_fee_valid
             }
-            is_fee_valid
-        } else if let Some(gas_price) = tx.gas_price {
-            // Legacy transaction validation
-            let is_price_valid = gas_price >= effective_base_fee;
-            if !is_price_valid {
-                warn!(
-                    "TX_PROCESSOR [id={}, hash={}]: Legacy gas price validation failed - gas_price: {}, effective_base_fee: {}",
-                    id_str, tx_hash_str, gas_price, effective_base_fee
-                );
+            GasFeeInfo::Legacy { gas_price } => {
+                // Legacy/EIP-2930: gas_price must cover base fee
+                let is_price_valid = gas_price >= effective_base_fee;
+                if !is_price_valid {
+                    warn!(
+                        "TX_PROCESSOR [id={}, hash={}]: Gas price validation failed - gas_price: {}, effective_base_fee: {}",
+                        id_str, tx_hash_str, gas_price, effective_base_fee
+                    );
+                }
+                is_price_valid
             }
-            is_price_valid
-        } else {
-            warn!(
-                "TX_PROCESSOR [id={}, hash={}]: Transaction missing gas pricing information",
-                id_str, tx_hash_str
-            );
-            false
         };
 
         if !is_valid {
@@ -270,6 +278,6 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
 }
 
 /// Compute the hash of a transaction from its RLP-encoded bytes
-pub fn compute_transaction_hash(tx_bytes: &[u8]) -> H256 {
-    H256::from(keccak256(tx_bytes))
+pub fn compute_transaction_hash(tx_bytes: &[u8]) -> B256 {
+    keccak256(tx_bytes)
 }

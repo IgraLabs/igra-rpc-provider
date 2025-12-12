@@ -8,13 +8,20 @@ repository = "https://github.com/IgraLabs/igra-rpc-provider"
 license = "Apache-2.0"
 
 [dependencies]
+alloy = { version = "1.1.3", default-features = false, features = [
+    "consensus",
+    "network",
+    "signers",
+    "rpc-types",
+    "serde"
+] }
 axum = { version = "0.8.3", features = ["macros"] }
+derive_more = { version = "1.0", features = ["display", "from"] }
 borsh = "1.5.7"
 bytes = "1.10.1"
 chrono = "0.4.35"
 clap = { version = "4.5.35", features = ["derive"] }
 config = "0.15.11"
-ethers = "2.0.14"
 flate2 = "1.1.0"
 hdrhistogram = "7"
 hex = "0.4"
