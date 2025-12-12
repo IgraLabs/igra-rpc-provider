@@ -2,14 +2,14 @@ use crate::clients::el_caller;
 use crate::config::GasConfig;
 use crate::error::AppError;
 use crate::types::rpc::Block;
-use ethers::types::U256;
+use alloy::primitives::U256;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-const GWEI_TO_WEI: U256 = U256([1_000_000_000, 0, 0, 0]);
+const GWEI_TO_WEI: u128 = 1_000_000_000;
 const IGRA_BLOCK_TIME: u64 = 1;
 
 /// Service responsible for all gas price management and validation
@@ -38,7 +38,8 @@ impl GasManager {
     /// Calculate the configured minimum floor in Wei using checked arithmetic
     fn min_floor_wei(&self) -> Result<U256, AppError> {
         let gwei = U256::from(self.config.min_protocol_fee_per_gas_gwei);
-        gwei.checked_mul(GWEI_TO_WEI).ok_or_else(|| {
+        let gwei_to_wei = U256::from(GWEI_TO_WEI);
+        gwei.checked_mul(gwei_to_wei).ok_or_else(|| {
             AppError::Internal("min_protocol_fee_per_gas_gwei multiplication overflow".to_string())
         })
     }
@@ -286,7 +287,7 @@ mod tests {
         let min_floor = gas_manager
             .min_floor_wei()
             .expect("min_floor_wei should not fail with valid config");
-        let expected = U256::from(10) * GWEI_TO_WEI; // 10 gwei in wei
+        let expected = U256::from(10) * U256::from(GWEI_TO_WEI); // 10 gwei in wei
         assert_eq!(min_floor, expected);
     }
 
@@ -352,7 +353,7 @@ mod tests {
         let result = gas_manager
             .apply_gas_price_floor(low_price)
             .expect("apply_gas_price_floor should succeed with valid input");
-        let expected_floor = U256::from(10) * GWEI_TO_WEI; // 10 gwei floor
+        let expected_floor = U256::from(10) * U256::from(GWEI_TO_WEI); // 10 gwei floor
         assert_eq!(result, expected_floor);
     }
 }

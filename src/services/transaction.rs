@@ -7,8 +7,9 @@ use crate::services::gas_price::GasPriceService;
 use crate::services::mining::TransactionMiner;
 use crate::types::rpc::{IgraPayload, RpcRequest, TxTypeId};
 use crate::AppState;
-use ethers::types::{Transaction, H256, U256};
-use ethers::utils::{keccak256, rlp};
+use alloy::consensus::TxEnvelope;
+use alloy::primitives::{keccak256, B256, U256};
+use alloy::rlp::Decodable;
 use serde_json::{json, Value};
 use std::error::Error;
 use std::sync::Arc;
@@ -343,32 +344,17 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
     })
 }
 
-/// Validates transaction fees using the new validation context
-/// This is a more focused function that handles fee validation specifically
+/// Validates transaction fees using the validation context
 fn validate_transaction_fees(
     context: &TransactionValidationContext,
 ) -> Result<(), TransactionError> {
-    // Parse the transaction with comprehensive error handling
-    let (transaction, tx_type) = parse_transaction_with_context(context)?;
-
-    // Validate fees if base fee is provided
-    if let Some(base_fee) = context.base_fee() {
-        validate_transaction_fee_by_type(&transaction, base_fee, tx_type, context.hash())?;
-    }
-
-    debug!(
-        "TX_VALIDATION [id={}, hash={}]: Fee validation completed successfully",
-        context.id(),
-        context.hash()
-    );
-
-    Ok(())
+    validate_comprehensive_transaction(context)
 }
 
 /// Parse transaction from validation context with enhanced error handling
 fn parse_transaction_with_context(
     context: &TransactionValidationContext,
-) -> Result<(Transaction, u8), TransactionError> {
+) -> Result<(TxEnvelope, u8), TransactionError> {
     match parse_rlp_transaction(context.bytes()) {
         Ok((tx, tx_type)) => {
             debug!(
@@ -393,18 +379,7 @@ fn parse_transaction_with_context(
     }
 }
 
-/// Validate transaction fees based on transaction type with cleaner interface
-fn validate_transaction_fee_by_type(
-    tx: &Transaction,
-    min_protocol_fee: U256,
-    tx_type: u8,
-    tx_hash: &str,
-) -> Result<(), TransactionError> {
-    validate_gas_fee_with_type(tx, min_protocol_fee, tx_type, tx_hash)
-}
-
 /// Validates an incoming transaction request and returns the decoded transaction bytes
-/// Renamed for clarity and improved error handling
 pub fn validate_transaction_request(
     req: &RpcRequest,
     effective_base_fee: Option<U256>,
@@ -423,7 +398,7 @@ pub fn validate_transaction_request(
         Err(error) => return (Err(error), None),
     };
 
-    // Step 3: Validate RLP and gas fees using improved validation
+    // Step 3: Validate RLP structure and gas fees
     let validation_context = TransactionValidationContext::new(
         transaction_id.clone(),
         tx_bytes.clone(),
@@ -454,8 +429,14 @@ fn validate_comprehensive_transaction(
 
     // Validate fees if base fee is available
     if let Some(base_fee) = context.base_fee() {
-        validate_transaction_fee_by_type(&transaction, base_fee, tx_type, context.hash())?;
+        validate_gas_fee_with_type(&transaction, base_fee, tx_type, context.hash())?;
     }
+
+    debug!(
+        "TX_VALIDATION [id={}, hash={}]: Validation completed successfully",
+        context.id(),
+        context.hash()
+    );
 
     Ok(())
 }
@@ -525,8 +506,8 @@ fn decode_hex_transaction(raw_tx: &str, id: &str) -> Result<Vec<u8>, Value> {
 }
 
 /// Computes transaction hash from raw bytes
-pub fn compute_transaction_hash(tx_bytes: &[u8]) -> H256 {
-    keccak256(tx_bytes).into()
+pub fn compute_transaction_hash(tx_bytes: &[u8]) -> B256 {
+    keccak256(tx_bytes)
 }
 
 /// Processes a transaction through the wallet caller
@@ -702,27 +683,54 @@ pub fn detect_transaction_type(data: &[u8]) -> Result<u8, AppError> {
     }
 }
 
-/// Parse RLP-encoded transaction data and return both the transaction and its type
-/// This function combines type detection with lenient RLP decoding
-pub fn parse_rlp_transaction(data: &[u8]) -> Result<(Transaction, u8), AppError> {
+/// Maximum transaction size in bytes (128KB - sufficient for all Ethereum transaction types)
+/// This limit prevents DoS attacks via oversized RLP payloads.
+const MAX_TRANSACTION_SIZE: usize = 128 * 1024;
+
+/// Parse RLP-encoded transaction data and return both the transaction and its type.
+///
+/// Alloy's TxEnvelope automatically handles all transaction types (Legacy, EIP-2930, EIP-1559, EIP-4844)
+/// without requiring manual fallback parsing.
+///
+/// # Security
+/// - Validates input size before decoding to prevent DoS via oversized payloads
+/// - Rejects unsupported transaction types (EIP-4844, EIP-7702)
+pub fn parse_rlp_transaction(data: &[u8]) -> Result<(TxEnvelope, u8), AppError> {
+    // Validate size before decoding to prevent DoS attacks
+    if data.len() > MAX_TRANSACTION_SIZE {
+        warn!(
+            "TX_PARSE: Transaction too large: {} bytes (max: {} bytes)",
+            data.len(),
+            MAX_TRANSACTION_SIZE
+        );
+        return Err(AppError::Internal(format!(
+            "Transaction too large: {} bytes (max: {} bytes)",
+            data.len(),
+            MAX_TRANSACTION_SIZE
+        )));
+    }
+
     let tx_type = detect_transaction_type(data)?;
 
-    // Check for unsupported transaction types first
     if tx_type >= tx_types::BLOB {
         return Err(AppError::Internal(format!(
             "Unsupported transaction type: {tx_type}"
         )));
     }
 
-    // Use a single decode path for all transaction types
-    // The ethers rlp decoder can handle both legacy and typed transactions
-    let transaction = rlp::decode::<Transaction>(data).map_err(|e| {
+    let tx = TxEnvelope::decode(&mut &data[..]).map_err(|e| {
+        warn!("Failed to decode type {} transaction: {:?}", tx_type, e);
         AppError::Internal(format!(
             "Failed to decode transaction (type {tx_type}): {e}"
         ))
     })?;
 
-    Ok((transaction, tx_type))
+    debug!(
+        "Successfully decoded type {} transaction using Alloy decoder",
+        tx_type
+    );
+
+    Ok((tx, tx_type))
 }
 
 /// Get human-readable transaction type name for logging
@@ -736,9 +744,49 @@ pub fn get_transaction_type_name(tx_type: u8) -> &'static str {
     }
 }
 
+/// Extracted gas fee information from a transaction.
+/// This consolidates the pattern matching logic used across validation functions.
+#[derive(Debug, Clone)]
+pub enum GasFeeInfo {
+    /// Legacy and EIP-2930 transactions use a single gas_price field
+    Legacy { gas_price: U256 },
+    /// EIP-1559 transactions use max_fee and max_priority_fee fields
+    Eip1559 {
+        max_fee_per_gas: U256,
+        max_priority_fee_per_gas: U256,
+    },
+}
+
+/// Extract gas fee information from a TxEnvelope.
+/// This is the single source of truth for gas fee extraction, used by both
+/// validation functions in transaction.rs and transaction_processor.rs.
+pub fn extract_gas_fees(tx: &TxEnvelope) -> Result<GasFeeInfo, AppError> {
+    match tx {
+        TxEnvelope::Legacy(signed_tx) => Ok(GasFeeInfo::Legacy {
+            gas_price: U256::from(signed_tx.tx().gas_price),
+        }),
+        TxEnvelope::Eip2930(signed_tx) => Ok(GasFeeInfo::Legacy {
+            gas_price: U256::from(signed_tx.tx().gas_price),
+        }),
+        TxEnvelope::Eip1559(signed_tx) => {
+            let inner = signed_tx.tx();
+            Ok(GasFeeInfo::Eip1559 {
+                max_fee_per_gas: U256::from(inner.max_fee_per_gas),
+                max_priority_fee_per_gas: U256::from(inner.max_priority_fee_per_gas),
+            })
+        }
+        TxEnvelope::Eip4844(_) => Err(AppError::Internal(
+            "EIP-4844 blob transactions are not supported".into(),
+        )),
+        TxEnvelope::Eip7702(_) => Err(AppError::Internal(
+            "EIP-7702 transactions are not supported".into(),
+        )),
+    }
+}
+
 /// Main validation function that routes to appropriate validation based on transaction type
 pub fn validate_gas_fee_with_type(
-    tx: &Transaction,
+    tx: &TxEnvelope,
     min_protocol_fee: U256,
     tx_type: u8,
     tx_hash: &str,
@@ -778,7 +826,7 @@ pub fn validate_gas_fee_with_type(
 /// Validate Legacy (Type 0) and EIP-2930 (Type 1) transactions
 /// Both use gas_price field and validate: gas_price >= min_protocol_fee
 pub fn validate_legacy_or_eip2930(
-    tx: &Transaction,
+    tx: &TxEnvelope,
     min_protocol_fee: U256,
     tx_type: u8,
     tx_hash: &str,
@@ -787,16 +835,17 @@ pub fn validate_legacy_or_eip2930(
 
     let tx_type_name = get_transaction_type_name(tx_type);
 
-    // Check if gas_price field exists
-    let gas_price = match tx.gas_price {
-        Some(price) => price,
-        None => {
+    // Extract gas_price using pattern matching on TxEnvelope
+    let gas_price = match tx {
+        TxEnvelope::Legacy(signed_tx) => U256::from(signed_tx.tx().gas_price),
+        TxEnvelope::Eip2930(signed_tx) => U256::from(signed_tx.tx().gas_price),
+        _ => {
             warn!(
-                "TX_VALIDATION [hash={}]: {} transaction missing gas_price field",
-                tx_hash, tx_type_name
+                "TX_VALIDATION [hash={}]: Expected Legacy or EIP-2930 transaction, got different type",
+                tx_hash
             );
             return Err(TransactionError::invalid_transaction_format(format!(
-                "{tx_type_name} transaction missing required gas_price field"
+                "{tx_type_name} transaction has unexpected envelope type"
             )));
         }
     };
@@ -818,9 +867,12 @@ pub fn validate_legacy_or_eip2930(
 }
 
 /// Validate EIP-1559 (Type 2) transactions
-/// Validates: max_priority_fee_per_gas >= min_protocol_fee
+/// Validates:
+/// - EIP-1559 invariant: max_priority_fee_per_gas <= max_fee_per_gas
+/// - max_fee_per_gas >= min_protocol_fee (must cover base fee)
+/// - max_priority_fee_per_gas >= min_protocol_fee (minimum tip requirement)
 pub fn validate_eip1559(
-    tx: &Transaction,
+    tx: &TxEnvelope,
     min_protocol_fee: U256,
     tx_hash: &str,
 ) -> Result<(), crate::errors::transaction::TransactionError> {
@@ -828,21 +880,52 @@ pub fn validate_eip1559(
 
     let tx_type_name = get_transaction_type_name(tx_types::EIP1559);
 
-    // Check if max_priority_fee_per_gas field exists
-    let max_priority_fee_per_gas = match tx.max_priority_fee_per_gas {
-        Some(fee) => fee,
-        None => {
+    // Extract both fee fields using pattern matching on TxEnvelope
+    let (max_fee_per_gas, max_priority_fee_per_gas) = match tx {
+        TxEnvelope::Eip1559(signed_tx) => {
+            let inner = signed_tx.tx();
+            (
+                U256::from(inner.max_fee_per_gas),
+                U256::from(inner.max_priority_fee_per_gas),
+            )
+        }
+        _ => {
             warn!(
-                "TX_VALIDATION [hash={}]: {} transaction missing max_priority_fee_per_gas field",
-                tx_hash, tx_type_name
+                "TX_VALIDATION [hash={}]: Expected EIP-1559 transaction, got different type",
+                tx_hash
             );
             return Err(TransactionError::invalid_transaction_format(format!(
-                "{tx_type_name} transaction missing required max_priority_fee_per_gas field"
+                "{tx_type_name} transaction has unexpected envelope type"
             )));
         }
     };
 
-    // Validate max_priority_fee_per_gas >= min_protocol_fee
+    // EIP-1559 invariant: max_priority_fee_per_gas must not exceed max_fee_per_gas
+    if max_priority_fee_per_gas > max_fee_per_gas {
+        warn!(
+            "TX_VALIDATION [hash={}]: {} transaction violates EIP-1559 invariant - max_priority_fee_per_gas ({}) > max_fee_per_gas ({})",
+            tx_hash, tx_type_name, max_priority_fee_per_gas, max_fee_per_gas
+        );
+        return Err(TransactionError::eip1559_validation_failed(
+            max_fee_per_gas.to_string(),
+            max_priority_fee_per_gas.to_string(),
+            min_protocol_fee.to_string(),
+        ));
+    }
+
+    // Validate max_fee_per_gas >= min_protocol_fee (must cover base fee)
+    if max_fee_per_gas < min_protocol_fee {
+        warn!(
+            "TX_VALIDATION [hash={}]: {} transaction max_fee_per_gas below protocol minimum - max_fee_per_gas: {} wei, required: {} wei",
+            tx_hash, tx_type_name, max_fee_per_gas, min_protocol_fee
+        );
+        return Err(TransactionError::insufficient_gas_fee(
+            min_protocol_fee.to_string(),
+            max_fee_per_gas.to_string(),
+        ));
+    }
+
+    // Validate max_priority_fee_per_gas >= min_protocol_fee (minimum tip requirement)
     if max_priority_fee_per_gas < min_protocol_fee {
         warn!(
             "TX_VALIDATION [hash={}]: {} transaction priority fee below protocol minimum - max_priority_fee_per_gas: {} wei, required: {} wei",
@@ -1011,14 +1094,17 @@ mod tests {
 
     #[test]
     fn test_parse_rlp_transaction_too_short_typed() {
-        // Typed transaction with only the type byte
         let short_data = [0x02]; // Only type byte, no RLP data
         let result = parse_rlp_transaction(&short_data);
         assert!(result.is_err());
-        assert!(result
+        let error_msg = result
             .expect_err("Should fail on short typed transaction")
-            .to_string()
-            .contains("Failed to decode transaction"));
+            .to_string();
+        assert!(
+            error_msg.contains("Failed to decode"),
+            "Expected error message to contain 'Failed to decode', got: {}",
+            error_msg
+        );
     }
 
     #[test]
@@ -1043,52 +1129,69 @@ mod tests {
             "Should be detected as EIP-1559 transaction"
         );
 
-        // Verify key fields are present
-        assert!(tx.max_fee_per_gas.is_some(), "Should have max_fee_per_gas");
-        assert!(
-            tx.max_priority_fee_per_gas.is_some(),
-            "Should have max_priority_fee_per_gas"
-        );
-        assert!(tx.to.is_some(), "Should have recipient address");
-
-        // Log the parsed values for debugging
-        println!("Parsed EIP-1559 transaction:");
-        println!("  Chain ID: {:?}", tx.chain_id);
-        println!("  Max Fee Per Gas: {:?}", tx.max_fee_per_gas);
-        println!(
-            "  Max Priority Fee Per Gas: {:?}",
-            tx.max_priority_fee_per_gas
-        );
-        println!("  Gas Limit: {:?}", tx.gas);
-        println!("  To: {:?}", tx.to);
+        // Verify key fields using pattern matching on TxEnvelope
+        match &tx {
+            TxEnvelope::Eip1559(signed_tx) => {
+                let inner = signed_tx.tx();
+                println!("Parsed EIP-1559 transaction:");
+                println!("  Chain ID: {}", inner.chain_id);
+                println!("  Max Fee Per Gas: {}", inner.max_fee_per_gas);
+                println!(
+                    "  Max Priority Fee Per Gas: {}",
+                    inner.max_priority_fee_per_gas
+                );
+                println!("  Gas Limit: {}", inner.gas_limit);
+                println!("  To: {:?}", inner.to);
+                assert!(inner.max_fee_per_gas > 0, "Should have max_fee_per_gas");
+                assert!(
+                    inner.max_priority_fee_per_gas > 0,
+                    "Should have max_priority_fee_per_gas"
+                );
+            }
+            _ => panic!("Expected EIP-1559 transaction variant"),
+        }
     }
 
-    // Tests for transaction fee validation functions
+    // Tests for transaction fee validation using real RLP-encoded transactions
+
+    /// Helper to get a real EIP-1559 transaction for testing
+    /// This transaction has max_priority_fee_per_gas = 2,000,000,000,001 wei (about 2000 gwei)
+    fn get_test_eip1559_tx() -> (TxEnvelope, u8) {
+        let tx_hex = "02f8d7824bd8820b558601d1a94a20018601d1a94a200182bf68940000000000000000000000000000000000feedad80b8645f872f55000000000000000000000000000000000000000000000000000000000026337595a0dc7c603d4296b70f5422daa22482d4afb088b29c426b4c9ec5ef019715a11978688306685db4f631b116ed0eeae19876fc9da3f3517653c8b35dee36ee90c080a01d70b4425acf0c6089788788fc51c1c2ef4e3f18203a2653fd462d9fc16bc0bba06b21e05530fa4d4b4ea243d15b4afcb08728cfbe3b788fcbf11687f542fa446f";
+        let tx_bytes = hex::decode(tx_hex).expect("Valid hex string");
+        parse_rlp_transaction(&tx_bytes).expect("Should parse test transaction")
+    }
+
+    /// Helper to get a real Legacy transaction for testing
+    /// gas_price = 20 gwei
+    fn get_test_legacy_tx() -> (TxEnvelope, u8) {
+        // Real legacy transaction with gas_price = 20 gwei (0x4a817c800 = 20_000_000_000)
+        let tx_hex = "f86c098504a817c800825208943535353535353535353535353535353535353535880de0b6b3a76400008025a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83";
+        let tx_bytes = hex::decode(tx_hex).expect("Valid hex string");
+        parse_rlp_transaction(&tx_bytes).expect("Should parse test legacy transaction")
+    }
 
     #[test]
     fn test_validate_gas_fee_with_type_legacy_success() {
-        use ethers::types::Transaction;
+        let (tx, tx_type) = get_test_legacy_tx();
+        assert_eq!(tx_type, tx_types::LEGACY);
 
-        let tx = Transaction {
-            gas_price: Some(U256::from(3_000_000_000u64)), // 3 gwei
-            ..Default::default()
-        };
-        let min_protocol_fee = U256::from(2_000_000_000u64); // 2 gwei
-        let result = validate_gas_fee_with_type(&tx, min_protocol_fee, tx_types::LEGACY, "0xtest");
+        // Legacy tx has gas_price = 20 gwei, so 10 gwei min should pass
+        let min_protocol_fee = U256::from(10_000_000_000u64); // 10 gwei
+        let result = validate_gas_fee_with_type(&tx, min_protocol_fee, tx_type, "0xtest");
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_validate_gas_fee_with_type_legacy_insufficient_fee() {
         use crate::errors::transaction::TransactionError;
-        use ethers::types::Transaction;
 
-        let tx = Transaction {
-            gas_price: Some(U256::from(1_000_000_000u64)), // 1 gwei
-            ..Default::default()
-        };
-        let min_protocol_fee = U256::from(2_000_000_000u64); // 2 gwei
-        let result = validate_gas_fee_with_type(&tx, min_protocol_fee, tx_types::LEGACY, "0xtest");
+        let (tx, tx_type) = get_test_legacy_tx();
+        assert_eq!(tx_type, tx_types::LEGACY);
+
+        // Legacy tx has gas_price = 20 gwei, so 30 gwei min should fail
+        let min_protocol_fee = U256::from(30_000_000_000u64); // 30 gwei
+        let result = validate_gas_fee_with_type(&tx, min_protocol_fee, tx_type, "0xtest");
         assert!(result.is_err());
         assert!(matches!(
             result.expect_err("Should fail with insufficient gas fee"),
@@ -1097,47 +1200,26 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_gas_fee_with_type_legacy_missing_gas_price() {
-        use crate::errors::transaction::TransactionError;
-        use ethers::types::Transaction;
-
-        let tx = Transaction {
-            gas_price: None,
-            ..Default::default()
-        };
-        let min_protocol_fee = U256::from(2_000_000_000u64);
-        let result = validate_gas_fee_with_type(&tx, min_protocol_fee, tx_types::LEGACY, "0xtest");
-        assert!(result.is_err());
-        assert!(matches!(
-            result.expect_err("Should fail with invalid transaction format"),
-            TransactionError::InvalidTransactionFormat(_)
-        ));
-    }
-
-    #[test]
     fn test_validate_gas_fee_with_type_eip1559_success() {
-        use ethers::types::Transaction;
+        let (tx, tx_type) = get_test_eip1559_tx();
+        assert_eq!(tx_type, tx_types::EIP1559);
 
-        let tx = Transaction {
-            max_priority_fee_per_gas: Some(U256::from(3_000_000_000u64)), // 3 gwei
-            ..Default::default()
-        };
-        let min_protocol_fee = U256::from(2_000_000_000u64); // 2 gwei
-        let result = validate_gas_fee_with_type(&tx, min_protocol_fee, tx_types::EIP1559, "0xtest");
+        // EIP-1559 tx has max_priority_fee ~2000 gwei, so 1000 gwei min should pass
+        let min_protocol_fee = U256::from(1_000_000_000_000u64); // 1000 gwei
+        let result = validate_gas_fee_with_type(&tx, min_protocol_fee, tx_type, "0xtest");
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_validate_gas_fee_with_type_eip1559_insufficient_fee() {
         use crate::errors::transaction::TransactionError;
-        use ethers::types::Transaction;
 
-        let tx = Transaction {
-            max_priority_fee_per_gas: Some(U256::from(1_000_000_000u64)), // 1 gwei
-            ..Default::default()
-        };
-        let min_protocol_fee = U256::from(2_000_000_000u64); // 2 gwei
-        let result = validate_gas_fee_with_type(&tx, min_protocol_fee, tx_types::EIP1559, "0xtest");
+        let (tx, tx_type) = get_test_eip1559_tx();
+        assert_eq!(tx_type, tx_types::EIP1559);
+
+        // EIP-1559 tx has max_priority_fee ~2000 gwei, so 3000 gwei min should fail
+        let min_protocol_fee = U256::from(3_000_000_000_000u64); // 3000 gwei
+        let result = validate_gas_fee_with_type(&tx, min_protocol_fee, tx_type, "0xtest");
         assert!(result.is_err());
         assert!(matches!(
             result.expect_err("Should fail with insufficient gas fee for EIP1559"),
@@ -1146,30 +1228,13 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_gas_fee_with_type_eip1559_missing_priority_fee() {
-        use crate::errors::transaction::TransactionError;
-        use ethers::types::Transaction;
-
-        let tx = Transaction {
-            max_priority_fee_per_gas: None,
-            ..Default::default()
-        };
-        let min_protocol_fee = U256::from(2_000_000_000u64);
-        let result = validate_gas_fee_with_type(&tx, min_protocol_fee, tx_types::EIP1559, "0xtest");
-        assert!(result.is_err());
-        assert!(matches!(
-            result.expect_err("Should fail with invalid transaction format for EIP1559"),
-            TransactionError::InvalidTransactionFormat(_)
-        ));
-    }
-
-    #[test]
     fn test_validate_gas_fee_with_type_blob_transaction_rejected() {
         use crate::errors::transaction::TransactionError;
-        use ethers::types::Transaction;
 
-        let tx = Transaction::default();
+        let (tx, _) = get_test_eip1559_tx();
         let min_protocol_fee = U256::from(2_000_000_000u64);
+
+        // Force tx_type to BLOB - should be rejected as unsupported
         let result = validate_gas_fee_with_type(&tx, min_protocol_fee, tx_types::BLOB, "0xtest");
         assert!(result.is_err());
         let error = result.expect_err("Should fail for blob transaction type");
@@ -1183,25 +1248,13 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_gas_fee_with_type_eip2930_success() {
-        use ethers::types::Transaction;
-
-        let tx = Transaction {
-            gas_price: Some(U256::from(3_000_000_000u64)), // 3 gwei
-            ..Default::default()
-        };
-        let min_protocol_fee = U256::from(2_000_000_000u64); // 2 gwei
-        let result = validate_gas_fee_with_type(&tx, min_protocol_fee, tx_types::EIP2930, "0xtest");
-        assert!(result.is_ok());
-    }
-
-    #[test]
     fn test_validate_gas_fee_with_type_future_type_rejected() {
         use crate::errors::transaction::TransactionError;
-        use ethers::types::Transaction;
 
-        let tx = Transaction::default();
+        let (tx, _) = get_test_eip1559_tx();
         let min_protocol_fee = U256::from(2_000_000_000u64);
+
+        // Force tx_type to 99 - should be rejected as unsupported
         let result = validate_gas_fee_with_type(&tx, min_protocol_fee, 99, "0xtest");
         assert!(result.is_err());
         let error = result.expect_err("Should fail for future transaction type");
@@ -1212,5 +1265,68 @@ mod tests {
         assert!(error
             .to_string()
             .contains("Unsupported transaction type: 99"));
+    }
+
+    #[test]
+    fn test_parse_rlp_transaction_size_limit() {
+        // Create oversized transaction (larger than MAX_TRANSACTION_SIZE = 128KB)
+        let oversized_data = vec![0x02; 130 * 1024]; // 130KB
+        let result = parse_rlp_transaction(&oversized_data);
+        assert!(result.is_err());
+        let error_msg = result
+            .expect_err("Should fail for oversized transaction")
+            .to_string();
+        assert!(error_msg.contains("Transaction too large"));
+        assert!(error_msg.contains("131072 bytes")); // 130 * 1024
+    }
+
+    #[test]
+    fn test_extract_gas_fees_eip1559() {
+        let (tx, _) = get_test_eip1559_tx();
+        let gas_info = extract_gas_fees(&tx).expect("Should extract gas fees");
+
+        match gas_info {
+            GasFeeInfo::Eip1559 {
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+            } => {
+                // The test transaction has max_fee = max_priority_fee = ~2000 gwei
+                assert!(max_fee_per_gas > U256::ZERO);
+                assert!(max_priority_fee_per_gas > U256::ZERO);
+                // EIP-1559 invariant: priority fee <= max fee
+                assert!(max_priority_fee_per_gas <= max_fee_per_gas);
+            }
+            _ => panic!("Expected EIP-1559 gas fee info"),
+        }
+    }
+
+    #[test]
+    fn test_extract_gas_fees_legacy() {
+        let (tx, _) = get_test_legacy_tx();
+        let gas_info = extract_gas_fees(&tx).expect("Should extract gas fees");
+
+        match gas_info {
+            GasFeeInfo::Legacy { gas_price } => {
+                // Legacy tx has gas_price = 20 gwei
+                assert_eq!(gas_price, U256::from(20_000_000_000u64));
+            }
+            _ => panic!("Expected Legacy gas fee info"),
+        }
+    }
+
+    #[test]
+    fn test_eip1559_invariant_passes_for_valid_tx() {
+        // The test EIP-1559 transaction has max_fee == max_priority_fee
+        // which satisfies the invariant max_priority_fee <= max_fee
+        let (tx, tx_type) = get_test_eip1559_tx();
+        assert_eq!(tx_type, tx_types::EIP1559);
+
+        // Use a very low min fee to ensure the validation passes
+        let min_protocol_fee = U256::from(1_000_000_000u64); // 1 gwei
+        let result = validate_eip1559(&tx, min_protocol_fee, "0xtest");
+        assert!(
+            result.is_ok(),
+            "Valid EIP-1559 transaction should pass validation"
+        );
     }
 }

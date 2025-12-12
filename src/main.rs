@@ -63,15 +63,13 @@ async fn main() -> Result<(), AppError> {
     let gas_price_service = GasPriceService::new(config.gas.clone());
     let proxy_service = ProxyService::new(config.el_url().to_string(), gas_price_service);
 
-    // Set up the shared state with new dependency injection
-    let state = Arc::new(
-        AppState::new(config, transaction_sender, wallet_caller, proxy_service)
-            .await
-            .unwrap_or_else(|e| {
-                eprintln!("Failed to create application state: {e}");
-                process::exit(1);
-            }),
-    );
+    // Set up the shared application state
+    let state = Arc::new(AppState::new(
+        config,
+        transaction_sender,
+        wallet_caller,
+        proxy_service,
+    ));
 
     // Build the Axum router
     let app = Router::new()

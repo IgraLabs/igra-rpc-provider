@@ -2,13 +2,13 @@ use crate::clients::el_caller;
 use crate::config::GasConfig;
 use crate::error::AppError;
 use crate::types::rpc::{Block, JsonRpcResponse};
-use ethers::types::U256;
+use alloy::primitives::U256;
 use serde_json::json;
 #[cfg(test)]
 use serde_json::Value;
 use tracing::info;
 
-const GWEI_TO_WEI: U256 = U256([1_000_000_000, 0, 0, 0]);
+const GWEI_TO_WEI: u128 = 1_000_000_000;
 const IGRA_BLOCK_TIME: u64 = 1;
 
 /// A service to handle gas price logic, such as enforcing a minimum floor.
@@ -39,7 +39,8 @@ impl GasPriceService {
     /// Helper: calculate the configured minimum floor in Wei using checked arithmetic.
     fn min_floor_wei(&self) -> Result<U256, AppError> {
         let gwei = U256::from(self.config.min_protocol_fee_per_gas_gwei);
-        gwei.checked_mul(GWEI_TO_WEI).ok_or_else(|| {
+        let gwei_to_wei = U256::from(GWEI_TO_WEI);
+        gwei.checked_mul(gwei_to_wei).ok_or_else(|| {
             AppError::Internal("min_protocol_fee_per_gas_gwei multiplication overflow".to_string())
         })
     }
@@ -168,12 +169,16 @@ mod tests {
         U256::from_str_radix(hex.trim_start_matches("0x"), 16).expect("Failed to parse hex")
     }
 
+    fn gwei_to_wei(gwei: u64) -> U256 {
+        U256::from(gwei).saturating_mul(U256::from(GWEI_TO_WEI))
+    }
+
     #[test]
     fn test_gas_price_below_floor_is_floored() {
         let service = create_test_service(100);
-        let price_wei = U256::from(50).saturating_mul(GWEI_TO_WEI); // 50 Gwei
+        let price_wei = gwei_to_wei(50); // 50 Gwei
         let price_hex = format!("0x{price_wei:x}");
-        let expected_wei = U256::from(100).saturating_mul(GWEI_TO_WEI);
+        let expected_wei = gwei_to_wei(100);
 
         let mut response = create_test_response_value(&price_hex);
         service.floor_gas_price_value(&mut response);
@@ -185,7 +190,7 @@ mod tests {
     #[test]
     fn test_gas_price_above_floor_is_unchanged() {
         let service = create_test_service(100);
-        let price_wei = U256::from(150).saturating_mul(GWEI_TO_WEI); // 150 Gwei
+        let price_wei = gwei_to_wei(150); // 150 Gwei
         let price_hex = format!("0x{price_wei:x}");
 
         let mut response = create_test_response_value(&price_hex);
@@ -198,7 +203,7 @@ mod tests {
     #[test]
     fn test_gas_price_equal_to_floor_is_unchanged() {
         let service = create_test_service(100);
-        let price_wei = U256::from(100).saturating_mul(GWEI_TO_WEI); // 100 Gwei
+        let price_wei = gwei_to_wei(100); // 100 Gwei
         let price_hex = format!("0x{price_wei:x}");
 
         let mut response = create_test_response_value(&price_hex);
@@ -225,7 +230,7 @@ mod tests {
         let server_url = server.uri();
 
         let service = create_test_service(100); // Floor is 100 Gwei
-        let high_network_base_fee = U256::from(150).saturating_mul(GWEI_TO_WEI); // 150 Gwei
+        let high_network_base_fee = gwei_to_wei(150); // 150 Gwei
 
         let mock_block_response = json!({
             "jsonrpc": "2.0",
@@ -270,8 +275,8 @@ mod tests {
         let server_url = server.uri();
 
         let service = create_test_service(100); // Floor is 100 Gwei
-        let min_floor_wei = U256::from(100).saturating_mul(GWEI_TO_WEI);
-        let low_network_base_fee = U256::from(50).saturating_mul(GWEI_TO_WEI); // 50 Gwei
+        let min_floor_wei = gwei_to_wei(100);
+        let low_network_base_fee = gwei_to_wei(50); // 50 Gwei
 
         let mock_block_response = json!({
             "jsonrpc": "2.0",
