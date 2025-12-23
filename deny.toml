@@ -34,6 +34,7 @@ ignore = [
     "RUSTSEC-2024-0436", # paste is unmaintained (project archived, but widely used and stable)
     "RUSTSEC-2025-0052", # async-std is discontinued (indirect dependency from kaspa crates)
     "RUSTSEC-2025-0057", # fxhash is unmaintained (indirect dependency from ethers crate)
+    "RUSTSEC-2025-0134", # rustls-pemfile unmaintained (indirect dependency from tonic)
 ]
 yanked = "warn"
 
@@ -58,6 +59,7 @@ allow = [
     "MPL-2.0",
     "CC0-1.0",
     "LGPL-3.0", # Allow LGPL for malachite crates (math library dependencies)
+    "LGPL-3.0-only", # Explicit LGPL-3.0-only identifier for malachite crates
     "CDLA-Permissive-2.0", # Community Data License Agreement - needed for webpki-roots
     "BSL-1.0", # Boost Software License 1.0 - OSI approved, needed for xxhash-rust via kaspa-wallet-core
 ]
@@ -101,7 +103,7 @@ unused = 'deny'
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-git = [
-    "https://github.com/IgraLabs/kaswallet-proto.git",
+    "ssh://git@github.com/IgraLabs/kaswallet.git",
     "https://github.com/IgraLabs/rusty-kaspa.git",
 ]
 

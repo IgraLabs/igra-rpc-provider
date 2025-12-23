@@ -1,0 +1,6 @@
+# Typos configuration
+# https://github.com/crate-ci/typos
+
+[default.extend-words]
+# DAA = Difficulty Adjustment Algorithm (Kaspa terminology)
+daa = "daa"
