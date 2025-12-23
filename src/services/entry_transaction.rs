@@ -35,10 +35,16 @@ pub enum EntryTransactionError {
     Config(String),
 
     #[error("Wallet error: {0}")]
-    Wallet(#[from] WalletCallerError),
+    Wallet(Box<WalletCallerError>),
 
     #[error("Serialization error: {0}")]
     Serialization(String),
+}
+
+impl From<WalletCallerError> for EntryTransactionError {
+    fn from(err: WalletCallerError) -> Self {
+        EntryTransactionError::Wallet(Box::new(err))
+    }
 }
 
 /// Validated arguments for Entry Transaction processing

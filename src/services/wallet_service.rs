@@ -42,7 +42,7 @@ impl WalletService {
     pub async fn new(config: WalletConfig) -> Result<Self, WalletServiceError> {
         let wallet_caller = WalletCaller::new(config.clone())
             .await
-            .map_err(WalletServiceError::InitializationFailed)?;
+            .map_err(|e| WalletServiceError::InitializationFailed(Box::new(e)))?;
 
         info!(
             "WALLET_SERVICE: Initialized with daemon URI: {}",
@@ -205,7 +205,7 @@ impl WalletService {
         // Create new wallet caller with updated config
         let new_wallet_caller = WalletCaller::new(new_config.clone())
             .await
-            .map_err(WalletServiceError::ConfigurationUpdateFailed)?;
+            .map_err(|e| WalletServiceError::ConfigurationUpdateFailed(Box::new(e)))?;
 
         self.wallet_caller = Arc::new(new_wallet_caller);
         self.config = new_config;
@@ -264,7 +264,7 @@ pub struct WalletStatus {
 #[derive(Debug, thiserror::Error)]
 pub enum WalletServiceError {
     #[error("Failed to initialize wallet service: {0}")]
-    InitializationFailed(WalletCallerError),
+    InitializationFailed(Box<WalletCallerError>),
 
     #[error("Transaction failed: {0}")]
     TransactionFailed(String),
@@ -273,7 +273,7 @@ pub enum WalletServiceError {
     InvalidRequest(String),
 
     #[error("Failed to update configuration: {0}")]
-    ConfigurationUpdateFailed(WalletCallerError),
+    ConfigurationUpdateFailed(Box<WalletCallerError>),
 
     #[error("Wallet service internal error: {0}")]
     InternalError(String),
@@ -281,7 +281,7 @@ pub enum WalletServiceError {
 
 impl From<WalletCallerError> for WalletServiceError {
     fn from(err: WalletCallerError) -> Self {
-        WalletServiceError::InitializationFailed(err)
+        WalletServiceError::InitializationFailed(Box::new(err))
     }
 }
 

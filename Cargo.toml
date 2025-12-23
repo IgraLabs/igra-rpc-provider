@@ -33,7 +33,7 @@ kaspa-bip32 = { git = "https://github.com/IgraLabs/rusty-kaspa.git", branch = "f
 kaspa-consensus-core = { git = "https://github.com/IgraLabs/rusty-kaspa.git", branch = "for-wallet" }
 kaspa-hashes = { git = "https://github.com/IgraLabs/rusty-kaspa.git", branch = "for-wallet" }
 kaspa-wallet-core = { git = "https://github.com/IgraLabs/rusty-kaspa.git", branch = "for-wallet" }
-kaswallet-proto = { git="https://github.com/IgraLabs/kaswallet-proto.git", branch = "main" }
+proto = { git = "ssh://git@github.com/IgraLabs/kaswallet.git", package = "kaswallet-proto", branch = "main" }
 once_cell = "1.19"
 rand = "0.8"
 reqwest = { version = "0.12.12", features = ["json"] }
