@@ -19,7 +19,7 @@ min_protocol_fee_per_gas_gwei = 100
 
 [mining]
 # Required prefix for mined transaction IDs (default: [0x97, 0xb1])
-required_prefix = [0x97, 0xb1]
+tx_id_prefix = [0x97, 0xb1]
 # Mining timeout in seconds (valid range: 0-300, default: 10)
 timeout_seconds = 10
 

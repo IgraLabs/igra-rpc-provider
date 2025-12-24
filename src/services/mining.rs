@@ -198,7 +198,7 @@ impl TransactionMiner {
         skip(self, transaction),
         fields(
             original_tx_id = %transaction.id(),
-            required_prefix = %format!("0x{}", hex::encode(&self.config.required_prefix)),
+            tx_id_prefix = %format!("0x{}", hex::encode(&self.config.tx_id_prefix)),
             timeout_seconds = self.config.timeout_seconds,
             original_payload_size = transaction.tx.payload.len(),
         )
@@ -228,9 +228,9 @@ impl TransactionMiner {
         start_time: Instant,
     ) -> MiningResult<(SignableTransaction, MiningStats)> {
         let timeout_duration = Duration::from_secs(self.config.timeout_seconds);
-        let required_prefix = self.config.required_prefix.clone();
+        let tx_id_prefix = self.config.tx_id_prefix.clone();
 
-        let mining_future = self.mine_with_blocking(transaction, required_prefix, start_time);
+        let mining_future = self.mine_with_blocking(transaction, tx_id_prefix, start_time);
 
         match timeout(timeout_duration, mining_future).await {
             Ok(result) => result,
@@ -244,7 +244,7 @@ impl TransactionMiner {
             target: "mining_operations",
             event_type = "mining_start",
             mining_operation = "start",
-            mining_required_prefix = %format!("0x{}", hex::encode(&self.config.required_prefix)),
+            tx_id_prefix = %format!("0x{}", hex::encode(&self.config.tx_id_prefix)),
             mining_timeout_seconds = self.config.timeout_seconds,
             transaction_id = %transaction.id(),
             transaction_payload_size = transaction.tx.payload.len(),
@@ -415,7 +415,7 @@ impl TransactionMiner {
     /// mining loop in a dedicated blocking thread to avoid blocking the async runtime.
     #[instrument(
         name = "mine_with_blocking",
-        skip(self, transaction, required_prefix),
+        skip(self, transaction, tx_id_prefix),
         fields(
             mining_phase = "blocking_execution",
             transaction_id = %transaction.id(),
@@ -424,7 +424,7 @@ impl TransactionMiner {
     async fn mine_with_blocking(
         &self,
         transaction: SignableTransaction,
-        required_prefix: Vec<u8>,
+        tx_id_prefix: Vec<u8>,
         start_time: Instant,
     ) -> MiningResult<(SignableTransaction, MiningStats)> {
         let config = self.config.clone();
@@ -436,7 +436,7 @@ impl TransactionMiner {
         );
 
         let result = tokio::task::spawn_blocking(move || {
-            Self::mine_blocking(transaction, required_prefix, config, start_time)
+            Self::mine_blocking(transaction, tx_id_prefix, config, start_time)
         })
         .await;
 
@@ -471,7 +471,7 @@ impl TransactionMiner {
     #[allow(clippy::arithmetic_side_effects)]
     fn mine_blocking(
         mut transaction: SignableTransaction,
-        required_prefix: Vec<u8>,
+        tx_id_prefix: Vec<u8>,
         _config: MiningConfig,
         start_time: Instant,
     ) -> MiningResult<(SignableTransaction, MiningStats)> {
@@ -502,7 +502,7 @@ impl TransactionMiner {
             target: "mining_operations",
             mining_operation = "loop_start",
             mining_original_payload_size = original_payload.len(),
-            mining_required_prefix = %format!("0x{}", hex::encode(&required_prefix)),
+            tx_id_prefix = %format!("0x{}", hex::encode(&tx_id_prefix)),
             "Starting nonce iteration loop"
         );
 
@@ -518,7 +518,7 @@ impl TransactionMiner {
             let transaction_id = transaction.id();
 
             // Check if we found the desired prefix
-            if Self::check_prefix(&transaction_id, &required_prefix) {
+            if Self::check_prefix(&transaction_id, &tx_id_prefix) {
                 let duration = start_time.elapsed();
                 let stats = MiningStats::new(nonce, duration, transaction_id);
 
@@ -654,8 +654,8 @@ impl TransactionMiner {
     }
 
     /// Checks if a transaction ID starts with the expected prefix
-    fn check_prefix(transaction_id: &Hash, required_prefix: &[u8]) -> bool {
-        transaction_id.as_bytes().starts_with(required_prefix)
+    fn check_prefix(transaction_id: &Hash, tx_id_prefix: &[u8]) -> bool {
+        transaction_id.as_bytes().starts_with(tx_id_prefix)
     }
 }
 
@@ -667,21 +667,21 @@ mod tests {
 
     fn create_test_config() -> MiningConfig {
         MiningConfig {
-            required_prefix: vec![0x00, 0x00], // Easy prefix for testing
+            tx_id_prefix: vec![0x00, 0x00], // Easy prefix for testing
             timeout_seconds: 5,
         }
     }
 
     fn create_test_config_with_timeout(timeout: u64) -> MiningConfig {
         MiningConfig {
-            required_prefix: vec![0xff, 0xff], // Use difficult prefix for timeout testing
+            tx_id_prefix: vec![0xff, 0xff], // Use difficult prefix for timeout testing
             timeout_seconds: timeout,
         }
     }
 
     fn create_test_config_with_prefix(prefix: Vec<u8>) -> MiningConfig {
         MiningConfig {
-            required_prefix: prefix,
+            tx_id_prefix: prefix,
             timeout_seconds: 5,
         }
     }
@@ -727,16 +727,16 @@ mod tests {
         // Note: Config validation happens in src/config.rs, not here
         // These tests just verify the config structure itself
         let config = MiningConfig {
-            required_prefix: vec![],
+            tx_id_prefix: vec![],
             timeout_seconds: 10,
         };
-        assert_eq!(config.required_prefix.len(), 0);
+        assert_eq!(config.tx_id_prefix.len(), 0);
 
         let config = MiningConfig {
-            required_prefix: vec![0x97, 0xb1],
+            tx_id_prefix: vec![0x97, 0xb1],
             timeout_seconds: 10,
         };
-        assert_eq!(config.required_prefix.len(), 2);
+        assert_eq!(config.tx_id_prefix.len(), 2);
     }
 
     // ========== Prefix Checking Tests ==========
@@ -1229,7 +1229,7 @@ mod tests {
         let config = create_test_config();
         let miner = TransactionMiner::new(config.clone());
 
-        assert_eq!(miner.config.required_prefix, config.required_prefix);
+        assert_eq!(miner.config.tx_id_prefix, config.tx_id_prefix);
         assert_eq!(miner.config.timeout_seconds, config.timeout_seconds);
     }
 
@@ -1329,7 +1329,7 @@ mod tests {
         let miner = TransactionMiner::new(config);
 
         // Test that the miner has the expected configuration for logging
-        assert_eq!(miner.config.required_prefix, vec![0x00, 0x00]);
+        assert_eq!(miner.config.tx_id_prefix, vec![0x00, 0x00]);
         assert_eq!(miner.config.timeout_seconds, 5);
     }
 
@@ -1338,7 +1338,7 @@ mod tests {
         let config = create_test_config();
 
         // Test that config values are as expected
-        assert_eq!(config.required_prefix, vec![0x00, 0x00]);
+        assert_eq!(config.tx_id_prefix, vec![0x00, 0x00]);
         assert_eq!(config.timeout_seconds, 5);
     }
 }
