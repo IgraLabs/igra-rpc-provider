@@ -160,15 +160,26 @@ cargo test
 ---
 
 ## ⚙️ Configuration
-The following environment variables can be used:
 
-| Variable         | Description                          | Default                          |
-|------------------|--------------------------------------|----------------------------------|
-| `SERVER_HOST`    | Address this app listen requests at  | `127.0.0.1`                      |
-| `SERVER_PORT`    | Port this app listen requests at     | `8535`                           |
-| `EL_URL`         | URL of the IGRA EL Client            | `http://127.0.0.1:8545`          |
-| `WALLET_COMMAND` | Shell command to call KASPA Wallet   | `sh -c 'echo {} >> /tmp/tx_log'` |
-| `READ_ONLY`      | Enable read-only mode (blocks writes)| `false`                          |
+### Breaking Changes
+
+**v0.3.0**: The environment variable `MINING_REQUIRED_PREFIX` has been renamed to `TX_ID_PREFIX` and the config field `mining.required_prefix` is now `mining.tx_id_prefix`.
+
+To migrate:
+- Environment variables: `MINING_REQUIRED_PREFIX` → `TX_ID_PREFIX`
+- config.toml: `[mining] required_prefix` → `[mining] tx_id_prefix`
+
+### Environment Variables
+
+| Variable                | Description                              | Default                          |
+|-------------------------|------------------------------------------|----------------------------------|
+| `SERVER_HOST`           | Address this app listen requests at      | `127.0.0.1`                      |
+| `SERVER_PORT`           | Port this app listen requests at         | `8535`                           |
+| `EL_URL`                | URL of the IGRA EL Client                | `http://127.0.0.1:8545`          |
+| `WALLET_DAEMON_URI`     | URI of the Kaspa Wallet daemon           | -                                |
+| `READ_ONLY`             | Enable read-only mode (blocks writes)    | `false`                          |
+| `TX_ID_PREFIX`          | Required prefix for mined transaction IDs (hex string, e.g., "97b1" or "0x97b1")| `97b1`                   |
+| `MINING_TIMEOUT_SECONDS`| Mining timeout in seconds (1-300)        | `10`                             |
 
 Example: Run with a custom node URL.
 ```sh
@@ -210,10 +221,25 @@ This will bind the container's port `8535` (the default port for the server) to 
 
 ---
 
-### 🛠 **Environment Configuration**
+### **3️⃣ Environment Configuration**
 
 If your application relies on specific environment variables or external configuration files, you can pass them to the container using the `-e` or `-v` flags, or with the `--env-file` option.
- For example:
+
+**Important**: Environment variables set in your shell are NOT automatically passed to Docker containers. You must explicitly pass each variable using the `-e` flag.
+
+#### Passing Individual Environment Variables
+
+```sh
+docker run -p 8535:8535 \
+  -e EL_URL="http://igra-el-client:8545" \
+  -e WALLET_DAEMON_URI="http://kaswallet:8082" \
+  -e WALLET_TO_ADDRESS="kaspa:qpam..." \
+  -e TX_ID_PREFIX="97b2" \
+  --network your-network \
+  igra-rpc-provider
+```
+
+#### Using an Environment File
 
 ```sh
 docker run -p 8535:8535 --env-file /path/to/custom.env igra-rpc-provider
@@ -223,7 +249,36 @@ Ensure that all required dependencies, such as the IGRA EL Client and the KASPA 
 
 ---
 
-### **3️⃣ Verify the Service**
+### **4️⃣ Entry Transaction Sender (Docker)**
+
+The `entry_transaction_sender` binary can also be run via Docker. Make sure to pass all required environment variables explicitly:
+
+```sh
+# Set environment variables in your shell
+export WALLET_TO_ADDRESS='kaspa:qpt9...'
+export WALLET_DAEMON_URI='http://kaswallet:8082'
+export KASWALLET_PASSWORD=''
+export TX_ID_PREFIX='97b2'
+
+# Run entry_transaction_sender - each -e flag passes the variable to the container
+docker run --rm \
+  -e WALLET_TO_ADDRESS \
+  -e WALLET_DAEMON_URI \
+  -e KASWALLET_PASSWORD \
+  -e TX_ID_PREFIX \
+  --network your-network \
+  --entrypoint /app/entry_transaction_sender \
+  igranetwork/rpc-provider:latest \
+  --recipient kaspa:qpv5... \
+  --amount 100 \
+  --l2-address 0xd850cc8fdd0348f12df47fd597784007c3c05f75
+```
+
+**Common mistake**: If you set `TX_ID_PREFIX=97b2` in your shell but omit `-e TX_ID_PREFIX` from the docker command, the container will use the default value (`97b1`) instead of your configured value.
+
+---
+
+### **5️⃣ Verify the Service**
 
 Once the container is running, you can verify it using a `curl` command for one of the supported JSON-RPC methods like `eth_blockNumber`:
 

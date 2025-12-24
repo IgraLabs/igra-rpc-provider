@@ -578,8 +578,8 @@ pub async fn process_wallet_call(
     let payload_size = wallet_payload_bytes.len();
 
     let miner = TransactionMiner::new(config.mining.clone());
-    debug!("WALLET_CALL [hash={}]: Created transaction miner with config: required_prefix=0x{}, timeout={}s",
-        tx_hash_str, hex::encode(&config.mining.required_prefix), config.mining.timeout_seconds);
+    debug!("WALLET_CALL [hash={}]: Created transaction miner with config: tx_id_prefix=0x{}, timeout={}s",
+        tx_hash_str, hex::encode(&config.mining.tx_id_prefix), config.mining.timeout_seconds);
 
     let transaction_params = TransactionParams::send_all(
         wallet_caller.default_to_address().to_string(),

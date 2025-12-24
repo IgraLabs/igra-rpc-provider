@@ -64,7 +64,7 @@ impl AppConfig {
             ("SECURITY_ENABLE_WHITELIST", "security.enable_whitelist"),
             ("READ_ONLY", "security.read_only"),
             // Mining configuration
-            ("MINING_REQUIRED_PREFIX", "mining.required_prefix"),
+            ("TX_ID_PREFIX", "mining.tx_id_prefix"),
             ("MINING_TIMEOUT_SECONDS", "mining.timeout_seconds"),
             // Gas configuration
             (
