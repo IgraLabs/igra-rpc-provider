@@ -24,6 +24,7 @@ pub static ALLOWED_METHODS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     methods.insert("eth_getFilterChanges");
     methods.insert("eth_getFilterLogs");
     methods.insert("eth_getLogs");
+    methods.insert("eth_getProof");
     methods.insert("eth_getStorageAt");
     methods.insert("eth_getTransactionByBlockHashAndIndex");
     methods.insert("eth_getTransactionByBlockNumberAndIndex");
