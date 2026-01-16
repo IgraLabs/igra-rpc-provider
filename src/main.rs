@@ -1,5 +1,8 @@
 // Import everything from the library instead
-use axum::{routing::post, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use igra_rpc_provider::{
     api,
     clients::wallet_caller::WalletCaller,
@@ -74,6 +77,7 @@ async fn main() -> Result<(), AppError> {
     // Build the Axum router
     let app = Router::new()
         .route("/", post(api::rpc::handle_rpc))
+        .route("/health", get(api::health::health_check))
         .with_state(state);
 
     info!("Router configured, starting server...");
