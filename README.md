@@ -55,6 +55,7 @@ See `tx_perf` usage and examples in [doc/tx-perf-cli.md](doc/tx-perf-cli.md).
   - Calls the KASPA Wallet for transaction submission to the Base Layer (KASPA DAG).
   - Returns transaction hash only if all checks pass and the transaction gets submitted.
 ✅ **Read-Only Mode**: When enabled via `READ_ONLY=true`, blocks all write operations (`eth_sendRawTransaction`, `personal_*`, `admin_*`).
+✅ **Health Endpoint**: `GET /health` verifies EL connectivity for load balancer health checks.
 ✅ Structured Logging: Uses `tracing` for detailed logs.
 ✅ Error Handling: Mimics standard Ethereum JSON-RPC error responses.
 ---
@@ -280,7 +281,21 @@ docker run --rm \
 
 ### **5️⃣ Verify the Service**
 
-Once the container is running, you can verify it using a `curl` command for one of the supported JSON-RPC methods like `eth_blockNumber`:
+Once the container is running, you can verify it using the health endpoint:
+
+```sh
+curl http://127.0.0.1:8535/health
+```
+
+You should receive a JSON response indicating the service is healthy:
+```json
+{
+  "status": "healthy",
+  "block_number": "0xa5b9"
+}
+```
+
+Alternatively, you can test with a JSON-RPC method like `eth_blockNumber`:
 
 ```sh
 curl -X POST http://127.0.0.1:8535 \

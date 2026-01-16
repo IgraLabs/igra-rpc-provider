@@ -290,6 +290,7 @@ graph TB
 - **Error Tracking**: Comprehensive error logging with context
 
 ### 2. Health Checks
+- **Health Endpoint**: `GET /health` verifies EL connectivity by calling `eth_blockNumber`
 - **Service Health**: Each service can report its health status
 - **Dependency Health**: Monitor external service dependencies
 - **Configuration Health**: Validate configuration at runtime
@@ -314,7 +315,6 @@ graph TB
 ### 3. Operational Improvements
 - **Dynamic Configuration**: Support for runtime configuration updates
 - **Graceful Shutdown**: Implement graceful shutdown for all services
-- **Health Endpoints**: Add health check endpoints for monitoring
 
 ## Conclusion
 
