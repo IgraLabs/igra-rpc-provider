@@ -1,0 +1,27 @@
+# Build artifacts
+target/
+debug/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Rust
+*.rs.bk
+*.pdb
+
+# CI/CD
+.github/
+
+# Documentation
+*.md
+!README.md
+
+# Misc
+.context/
