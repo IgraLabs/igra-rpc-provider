@@ -10,6 +10,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: "sccache"
@@ -51,6 +54,7 @@ jobs:
 
       - name: Install typos
         run: |
+          export PATH="$CARGO_HOME/bin:$PATH"
           if ! command -v typos &> /dev/null; then
             RUSTC_WRAPPER= cargo install typos-cli --locked
           fi
