@@ -24,7 +24,7 @@ env:
 jobs:
   security_audit:
     runs-on: [self-hosted, igra-rpc-provider]
-    timeout-minutes: 10
+    timeout-minutes: 40
     permissions:
       contents: read
       checks: write
