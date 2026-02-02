@@ -5,11 +5,11 @@ use axum::{
 };
 use igra_rpc_provider::{
     api,
-    clients::wallet_caller::WalletCaller,
     config::AppConfig,
     error::AppError,
     services::{
-        gas_price::GasPriceService, proxy::ProxyService, transaction::start_transaction_processor,
+        gas_price::GasPriceService, proxy::ProxyService,
+        transaction::{start_transaction_processor, WalletBackend},
     },
     AppState,
 };
@@ -47,30 +47,43 @@ async fn main() -> Result<(), AppError> {
     info!("IGRA RPC PROVIDER STARTING");
     info!("Listening on: {}", addr);
     info!("EL client URL: {}", config.el_url());
-    info!("KASPA wallet: {}", config.wallet.wallet_daemon_uri);
+
+    let gas_price_service = GasPriceService::new(config.gas.clone());
+
+    let mut wallet_configs = Vec::with_capacity(config.wallets.len().saturating_add(1));
+    wallet_configs.push(config.wallet.clone());
+    wallet_configs.extend(config.wallets.clone());
+
+    let mut wallet_backends = Vec::with_capacity(wallet_configs.len());
+    for wallet_config in wallet_configs {
+        match WalletBackend::connect(wallet_config).await {
+            Ok(backend) => {
+                info!("KASPA wallet backend connected: {}", backend.daemon_uri);
+                wallet_backends.push(backend);
+            }
+            Err(err) => {
+                error!("Failed to connect to wallet backend: {}", err);
+            }
+        }
+    }
+
+    if wallet_backends.is_empty() {
+        error!("No wallet backends available; refusing to start");
+        process::exit(1);
+    }
 
     // Start the transaction processor and get the sender
-    let transaction_sender = start_transaction_processor(config.clone());
+    let transaction_sender =
+        start_transaction_processor(config.clone(), wallet_backends, gas_price_service.clone());
     info!("Transaction processor started");
 
-    let wallet_caller_result = WalletCaller::new(config.wallet.clone()).await;
-    if let Err(err) = wallet_caller_result {
-        error!("Failed to create WalletCaller: {}", err);
-        return Ok(());
-    }
-    let wallet_caller = Arc::new(
-        wallet_caller_result.expect("WalletCaller should have been successfully initialized"),
-    );
-
     // Create the new services using dependency injection
-    let gas_price_service = GasPriceService::new(config.gas.clone());
     let proxy_service = ProxyService::new(config.el_url().to_string(), gas_price_service);
 
     // Set up the shared application state
     let state = Arc::new(AppState::new(
         config,
         transaction_sender,
-        wallet_caller,
         proxy_service,
     ));
 

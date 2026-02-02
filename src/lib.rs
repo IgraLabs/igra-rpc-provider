@@ -2,10 +2,8 @@
 //!
 //! Core library components for the IGRA RPC Provider
 
-use crate::clients::wallet_caller::WalletCaller;
 use crate::config::AppConfig;
 use crate::services::{proxy::ProxyService, transaction::TransactionRequest};
-use std::sync::Arc;
 use tokio::sync::mpsc;
 
 pub mod api;
@@ -23,8 +21,6 @@ pub struct AppState {
     pub config: AppConfig,
     /// Channel for transaction processing
     pub transaction_sender: mpsc::Sender<TransactionRequest>,
-    /// Wallet caller for Kaspa wallet operations
-    pub wallet_caller: Arc<WalletCaller>,
     /// Proxy service for EL client communication
     pub proxy_service: ProxyService,
 }
@@ -34,13 +30,11 @@ impl AppState {
     pub fn new(
         config: AppConfig,
         transaction_sender: mpsc::Sender<TransactionRequest>,
-        wallet_caller: Arc<WalletCaller>,
         proxy_service: ProxyService,
     ) -> Self {
         Self {
             config,
             transaction_sender,
-            wallet_caller,
             proxy_service,
         }
     }

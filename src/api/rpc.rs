@@ -14,6 +14,7 @@ use axum::{
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 
 /// Handles JSON-RPC requests and routes them to the appropriate handler.
@@ -24,7 +25,7 @@ pub async fn handle_rpc(
 ) -> impl IntoResponse {
     match envelope {
         RpcEnvelope::Single(req) => Json(process_single_request(&state, req).await),
-        RpcEnvelope::Batch(mut requests) => {
+        RpcEnvelope::Batch(requests) => {
             if requests.is_empty() {
                 // JSON-RPC 2.0: empty batch is an invalid request; return single error object
                 return Json(json_rpc_error(
@@ -34,10 +35,26 @@ pub async fn handle_rpc(
                 ));
             }
 
-            let mut responses = Vec::with_capacity(requests.len());
-            for req in requests.drain(..) {
-                let value = process_single_request(&state, req).await;
-                responses.push(value);
+            let request_count = requests.len();
+            let mut responses = vec![Value::Null; request_count];
+
+            let mut join_set = JoinSet::new();
+            for (index, req) in requests.into_iter().enumerate() {
+                let state = state.clone();
+                join_set.spawn(async move { (index, process_single_request(&state, req).await) });
+            }
+
+            while let Some(join_result) = join_set.join_next().await {
+                match join_result {
+                    Ok((index, value)) => {
+                        if let Some(slot) = responses.get_mut(index) {
+                            *slot = value;
+                        }
+                    }
+                    Err(err) => {
+                        error!("RPC batch task failed: {}", err);
+                    }
+                }
             }
 
             Json(Value::Array(responses))
@@ -267,6 +284,7 @@ mod tests {
                     wallet_daemon_uri: "http://localhost:8082".to_string(),
                     to_address: "".to_string(),
                 },
+                wallets: Vec::new(),
                 security: SecurityConfig {
                     enable_whitelist: self.enable_whitelist,
                     read_only: self.read_only,

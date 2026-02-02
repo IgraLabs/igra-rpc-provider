@@ -20,6 +20,9 @@ pub struct AppConfig {
     pub proxy: ProxyConfig,
     /// Wallet connection configuration
     pub wallet: WalletConfig,
+    /// Additional wallets for parallel transaction processing (optional)
+    #[serde(default)]
+    pub wallets: Vec<WalletConfig>,
     /// Security and whitelist configuration
     pub security: SecurityConfig,
     /// Mining configuration
@@ -118,6 +121,13 @@ impl AppConfig {
             .wallet
             .validate()
             .map_err(|e| AppError::ConfigError(format!("Wallet config: {e}")))?;
+
+        if let Err(errors) = validate_all_configs(&config.wallets) {
+            return Err(AppError::ConfigError(format!(
+                "Wallets config: {}",
+                errors.join(", ")
+            )));
+        }
 
         config
             .security

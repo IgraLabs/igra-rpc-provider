@@ -9,6 +9,16 @@ el_url = "http://execution-layer:8545"
 wallet_daemon_uri = "http://kaswallet:8082"
 to_address = "kaspatest:qpv8hxvmtvu0tjruup8y5ggqnx9qt5cre32vxrk8073v28w94g99xt57cy60h"
 
+# Optional: additional wallets for parallel transaction processing.
+# Add one `[[wallets]]` entry per extra Kaswallet daemon.
+#
+# [[wallets]]
+# wallet_daemon_uri = "http://kaswallet-2:8082"
+# to_address = "kaspatest:qpv8hxvmtvu0tjruup8y5ggqnx9qt5cre32vxrk8073v28w94g99xt57cy60h"
+#
+# [[wallets]]
+# wallet_daemon_uri = "http://kaswallet-3:8082"
+# to_address = "kaspatest:qpv8hxvmtvu0tjruup8y5ggqnx9qt5cre32vxrk8073v28w94g99xt57cy60h"
 
 [security]
 enable_whitelist = true

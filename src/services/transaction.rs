@@ -1,4 +1,4 @@
-use crate::clients::wallet_caller::TransactionParams;
+use crate::clients::wallet_caller::{TransactionParams, WalletCaller, WalletCallerError};
 use crate::config::AppConfig;
 use crate::error::AppError;
 use crate::errors::transaction::TransactionError;
@@ -13,7 +13,7 @@ use alloy::rlp::Decodable;
 use serde_json::{json, Value};
 use std::error::Error;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -66,164 +66,223 @@ impl TransactionValidationContext {
     }
 }
 
-// Structure to represent a transaction request that needs to be processed sequentially
+/// A connected wallet backend used by the transaction processor pool.
+#[derive(Clone)]
+pub struct WalletBackend {
+    pub daemon_uri: String,
+    caller: Arc<WalletCaller>,
+}
+
+impl WalletBackend {
+    pub async fn connect(wallet_config: crate::config::WalletConfig) -> Result<Self, WalletCallerError> {
+        let daemon_uri = wallet_config.wallet_daemon_uri.clone();
+        let caller = Arc::new(WalletCaller::new(wallet_config).await?);
+        Ok(Self { daemon_uri, caller })
+    }
+
+    fn caller(&self) -> &Arc<WalletCaller> {
+        &self.caller
+    }
+}
+
+/// Structure to represent a transaction request that needs to be processed by the processor pool.
 pub struct TransactionRequest {
-    pub raw_tx: String,
     pub tx_bytes: Vec<u8>,
     pub id: Value,
-    pub app_state: Arc<AppState>,
-    pub response_sender: mpsc::Sender<Result<(), String>>,
+    pub response_sender: oneshot::Sender<Result<(), String>>,
 }
 
 /// Creates and starts the background transaction processor
 /// Returns a channel sender that can be used to queue transactions
-pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<TransactionRequest> {
-    let (transaction_sender, mut transaction_receiver) = mpsc::channel::<TransactionRequest>(1024);
+pub fn start_transaction_processor(
+    config: AppConfig,
+    wallet_backends: Vec<WalletBackend>,
+    gas_price_service: GasPriceService,
+) -> mpsc::Sender<TransactionRequest> {
+    let (transaction_sender, transaction_receiver) = mpsc::channel::<TransactionRequest>(1024);
     info!(
         "TX_PROCESSOR: Starting transaction processor with queue size={}",
         1024
     );
 
-    // Start the sequential transaction processor task
     let config = Arc::new(config);
-    tokio::spawn(async move {
-        info!("TX_PROCESSOR: Background worker started");
+    let shared_receiver = Arc::new(tokio::sync::Mutex::new(transaction_receiver));
 
-        let mut processed_count: u16 = 0;
-        let mut error_count: u16 = 0;
+    for wallet_backend in wallet_backends {
+        let config = config.clone();
+        let gas_price_service = gas_price_service.clone();
+        let shared_receiver = shared_receiver.clone();
 
-        // Create GasPriceService for fee validation
-        let gas_price_service = GasPriceService::new(config.gas.clone());
-
-        // Process transactions one at a time
-        while let Some(tx_request) = transaction_receiver.recv().await {
-            let tx_hash = compute_transaction_hash(&tx_request.tx_bytes);
-            let tx_hash_str = format!("{tx_hash:#x}");
-
-            // Generate a proper ID string, using UUID if the original ID is null or invalid
-            let id_str = if tx_request.id.is_null() {
-                let uuid = Uuid::new_v4().to_string();
-                info!(
-                    "TX_PROCESSOR [hash={}]: Received transaction with null ID, assigning UUID: {}",
-                    tx_hash_str, uuid
-                );
-                uuid
-            } else {
-                tx_request.id.to_string()
-            };
-
-            // Log full payload bytes
-            let full_payload = format!("0x{}", hex::encode(&tx_request.tx_bytes));
-
-            info!(
-                "TX_PROCESSOR [id={}, hash={}]: Processing transaction, payload_size={}, payload={}",
-                id_str,
-                tx_hash_str,
-                tx_request.tx_bytes.len(),
-                full_payload
-            );
-
-            let start = std::time::Instant::now();
-
-            // Calculate effective base fee for this processing cycle
-            let effective_base_fee = match gas_price_service
-                .get_effective_base_fee(config.el_url())
-                .await
-            {
-                Ok(fee) => {
-                    info!(
-                        "TX_PROCESSOR [id={}, hash={}]: Effective base fee calculated: {} wei",
-                        id_str, tx_hash_str, fee
-                    );
-                    fee
-                }
-                Err(e) => {
-                    error!(
-                        "TX_PROCESSOR [id={}, hash={}]: Failed to fetch base fee: {}. Rejecting transaction.",
-                        id_str, tx_hash_str, e
-                    );
-                    let error_msg = format!("Failed to fetch base fee: {e}");
-                    let send_response_result =
-                        tx_request.response_sender.send(Err(error_msg)).await;
-                    if let Err(send_err) = send_response_result {
-                        error!(
-                            "TX_PROCESSOR [id={}, hash={}]: Failed to send error response: {}",
-                            id_str, tx_hash_str, send_err
-                        );
-                    }
-                    continue;
-                }
-            };
-
-            // Create a Value with the proper ID for passing to process_wallet_call
-            let id_value = if tx_request.id.is_null() {
-                json!(id_str)
-            } else {
-                tx_request.id.clone()
-            };
-
-            // Create validation context for better organization
-            let validation_context = TransactionValidationContext::new(
-                id_str.clone(),
-                tx_request.tx_bytes.clone(),
-                Some(effective_base_fee),
-            );
-
-            // Validate transaction fee before processing
-            let fee_validation_result = validate_transaction_fees(&validation_context);
-
-            // If fee validation failed, don't proceed to wallet call
-            let process_wallet_result = match fee_validation_result {
-                Ok(_) => {
-                    // Call the wallet sequentially for each transaction
-                    process_wallet_call(
-                        &tx_request.tx_bytes,
-                        &config,
-                        id_value,
-                        tx_request.app_state,
-                    )
-                    .await
-                }
-                Err(transaction_error) => {
-                    let error_msg = transaction_error.to_string();
-                    error!(
-                        "TX_PROCESSOR [id={}, hash={}]: Fee validation failed: {}",
-                        id_str, tx_hash_str, error_msg
-                    );
-                    Err(error_msg)
-                }
-            };
-            let response = match process_wallet_result {
-                Ok(_) => {
-                    let duration = start.elapsed();
-                    processed_count = processed_count.saturating_add(1);
-                    info!("TX_PROCESSOR [id={}, hash={}]: Transaction processed successfully, time={:?}, payload_size={}, payload={}, total_success={}, total_errors={}",
-                        id_str, tx_hash_str, duration, tx_request.tx_bytes.len(), full_payload, processed_count, error_count);
-                    Ok(())
-                }
-                Err(err) => {
-                    let duration = start.elapsed();
-                    error_count = error_count.saturating_add(1);
-                    error!("TX_PROCESSOR [id={}, hash={}]: Transaction failed: {}, time={:?}, payload_size={}, total_success={}, total_errors={}",
-                        id_str, tx_hash_str, err, duration, tx_request.tx_bytes.len(), processed_count, error_count);
-                    Err(err)
-                }
-            };
-            // Send the response back to the sender
-            let send_response_result = tx_request.response_sender.send(response).await;
-            if let Err(e) = send_response_result {
-                error!(
-                    "TX_PROCESSOR [id={}, hash={}]: Failed to send response: {}",
-                    id_str, tx_hash_str, e
-                );
-            }
-        }
-    });
+        tokio::spawn(async move {
+            transaction_worker(wallet_backend, config, gas_price_service, shared_receiver).await;
+        });
+    }
 
     transaction_sender
 }
 
-// Process transaction immediately but queue for sequential wallet calls
+async fn transaction_worker(
+    wallet_backend: WalletBackend,
+    config: Arc<AppConfig>,
+    gas_price_service: GasPriceService,
+    receiver: Arc<tokio::sync::Mutex<mpsc::Receiver<TransactionRequest>>>,
+) {
+    info!(
+        "TX_PROCESSOR: Worker started (wallet_daemon_uri={})",
+        wallet_backend.daemon_uri
+    );
+
+    let miner = TransactionMiner::new(config.mining.clone());
+
+    let mut processed_count: u16 = 0;
+    let mut error_count: u16 = 0;
+
+    loop {
+        let tx_request = {
+            let mut guard = receiver.lock().await;
+            guard.recv().await
+        };
+
+        let Some(tx_request) = tx_request else {
+            info!(
+                "TX_PROCESSOR: Worker exiting (wallet_daemon_uri={})",
+                wallet_backend.daemon_uri
+            );
+            return;
+        };
+
+        let tx_hash = compute_transaction_hash(&tx_request.tx_bytes);
+        let tx_hash_str = format!("{tx_hash:#x}");
+
+        // Generate a proper ID string, using UUID if the original ID is null or invalid
+        let id_str = if tx_request.id.is_null() {
+            let uuid = Uuid::new_v4().to_string();
+            info!(
+                "TX_PROCESSOR [hash={}]: Received transaction with null ID, assigning UUID: {}",
+                tx_hash_str, uuid
+            );
+            uuid
+        } else {
+            tx_request.id.to_string()
+        };
+
+        // Log full payload bytes
+        let full_payload = format!("0x{}", hex::encode(&tx_request.tx_bytes));
+
+        info!(
+            "TX_PROCESSOR [id={}, hash={}, wallet={}]: Processing transaction, payload_size={}, payload={}",
+            id_str,
+            tx_hash_str,
+            wallet_backend.daemon_uri,
+            tx_request.tx_bytes.len(),
+            full_payload
+        );
+
+        let start = std::time::Instant::now();
+
+        // Calculate effective base fee for this processing cycle
+        let effective_base_fee = match gas_price_service
+            .get_effective_base_fee(config.el_url())
+            .await
+        {
+            Ok(fee) => {
+                info!(
+                    "TX_PROCESSOR [id={}, hash={}]: Effective base fee calculated: {} wei",
+                    id_str, tx_hash_str, fee
+                );
+                fee
+            }
+            Err(e) => {
+                error!(
+                    "TX_PROCESSOR [id={}, hash={}]: Failed to fetch base fee: {}. Rejecting transaction.",
+                    id_str, tx_hash_str, e
+                );
+                let _ = tx_request
+                    .response_sender
+                    .send(Err(format!("Failed to fetch base fee: {e}")));
+                continue;
+            }
+        };
+
+        // Create a Value with the proper ID for passing to process_wallet_call
+        let id_value = if tx_request.id.is_null() {
+            json!(id_str)
+        } else {
+            tx_request.id.clone()
+        };
+
+        // Create validation context for better organization
+        let validation_context = TransactionValidationContext::new(
+            id_str.clone(),
+            tx_request.tx_bytes.clone(),
+            Some(effective_base_fee),
+        );
+
+        // Validate transaction fee before processing
+        let fee_validation_result = validate_transaction_fees(&validation_context);
+
+        // If fee validation failed, don't proceed to wallet call
+        let process_wallet_result = match fee_validation_result {
+            Ok(_) => {
+                process_wallet_call(
+                    &tx_request.tx_bytes,
+                    &config,
+                    id_value,
+                    &wallet_backend,
+                    &miner,
+                )
+                .await
+            }
+            Err(transaction_error) => {
+                let error_msg = transaction_error.to_string();
+                error!(
+                    "TX_PROCESSOR [id={}, hash={}]: Fee validation failed: {}",
+                    id_str, tx_hash_str, error_msg
+                );
+                Err(error_msg)
+            }
+        };
+
+        let response = match process_wallet_result {
+            Ok(_) => {
+                let duration = start.elapsed();
+                processed_count = processed_count.saturating_add(1);
+                info!(
+                    "TX_PROCESSOR [id={}, hash={}, wallet={}]: Transaction processed successfully, time={:?}, payload_size={}, payload={}, wallet_success={}, wallet_errors={}",
+                    id_str,
+                    tx_hash_str,
+                    wallet_backend.daemon_uri,
+                    duration,
+                    tx_request.tx_bytes.len(),
+                    full_payload,
+                    processed_count,
+                    error_count
+                );
+                Ok(())
+            }
+            Err(err) => {
+                let duration = start.elapsed();
+                error_count = error_count.saturating_add(1);
+                error!(
+                    "TX_PROCESSOR [id={}, hash={}, wallet={}]: Transaction failed: {}, time={:?}, payload_size={}, wallet_success={}, wallet_errors={}",
+                    id_str,
+                    tx_hash_str,
+                    wallet_backend.daemon_uri,
+                    err,
+                    duration,
+                    tx_request.tx_bytes.len(),
+                    processed_count,
+                    error_count
+                );
+                Err(err)
+            }
+        };
+
+        let _ = tx_request.response_sender.send(response);
+    }
+}
+
+// Process transaction immediately but queue for background wallet processing.
 pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value {
     // If ID is null, generate a UUID
     let id_value = if req.id.is_null() {
@@ -289,13 +348,11 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
     info!("TX [id={}, hash={}]: Computed hash, now queueing for background processing, payload_size={}, available_capacity={}",
         id, tx_hash_str, tx_bytes.len(), available);
 
-    let (response_sender, mut response_receiver) = mpsc::channel::<Result<(), String>>(1);
-    // Queue the transaction for sequential processing
+    let (response_sender, response_receiver) = oneshot::channel::<Result<(), String>>();
+    // Queue the transaction for background processing
     let tx_request = TransactionRequest {
-        raw_tx: req.params[0].as_str().unwrap_or("").to_string(),
         tx_bytes,
         id: id_value.clone(),
-        app_state: state.clone(),
         response_sender,
     };
 
@@ -308,7 +365,14 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
             e,
             state.transaction_sender.capacity()
         );
-        // Even if queueing fails, we still return the hash to the user
+        return json!({
+            "jsonrpc": "2.0",
+            "error": {
+                "code": -32603,
+                "message": "Transaction processing unavailable"
+            },
+            "id": id_value
+        });
     } else {
         let queue_time = queue_start.elapsed();
         info!(
@@ -317,10 +381,23 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
         );
     }
 
-    let response = response_receiver
-        .recv()
-        .await
-        .expect("Failed to receive response from transaction processor");
+    let response = match response_receiver.await {
+        Ok(result) => result,
+        Err(_) => {
+            error!(
+                "TX [id={}, hash={}]: Transaction processor dropped response channel",
+                id, tx_hash_str
+            );
+            return json!({
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": -32603,
+                    "message": "Transaction processing failed"
+                },
+                "id": id_value
+            });
+        }
+    };
 
     if let Err(e) = response {
         return json!({
@@ -515,7 +592,8 @@ pub async fn process_wallet_call(
     tx_bytes: &[u8],
     config: &AppConfig,
     id: Value,
-    app_state: Arc<AppState>,
+    wallet_backend: &WalletBackend,
+    miner: &TransactionMiner,
 ) -> Result<Value, String> {
     // For now, we'll use a mock nonce. In the future, this will be the result of mining.
     let nonce = [0u8, 0u8, 0u8, 1u8];
@@ -560,16 +638,17 @@ pub async fn process_wallet_call(
     info!(
         "WALLET_CALL [hash={}]: Connecting to KASPA Wallet at {}, payload_size={}",
         tx_hash_str,
-        config.wallet.wallet_daemon_uri,
+        wallet_backend.daemon_uri,
         wallet_payload_bytes.len()
     );
 
-    let wallet_caller = app_state.wallet_caller.clone();
+    let wallet_caller = wallet_backend.caller();
 
     // Actually send the transaction
     info!(
-        "WALLET_CALL [hash={}]: Sending transaction to wallet, payload_size={}",
+        "WALLET_CALL [hash={}, wallet={}]: Sending transaction to wallet, payload_size={}",
         tx_hash_str,
+        wallet_backend.daemon_uri,
         wallet_payload_bytes.len()
     );
     let send_start = std::time::Instant::now();
@@ -577,7 +656,6 @@ pub async fn process_wallet_call(
     // Capture payload size before moving it
     let payload_size = wallet_payload_bytes.len();
 
-    let miner = TransactionMiner::new(config.mining.clone());
     debug!("WALLET_CALL [hash={}]: Created transaction miner with config: tx_id_prefix=0x{}, timeout={}s",
         tx_hash_str, hex::encode(&config.mining.tx_id_prefix), config.mining.timeout_seconds);
 
@@ -589,14 +667,14 @@ pub async fn process_wallet_call(
 
     // Use retry-enabled method with retry config
     if let Err(err) = wallet_caller
-        .mine_and_send_transaction_with_retry(transaction_params, &miner, &config.retry)
+        .mine_and_send_transaction_with_retry(transaction_params, miner, &config.retry)
         .await
     {
         let error_msg = format!("KASPA Wallet call failed: {err}");
         let duration = send_start.elapsed();
         error!(
-            "WALLET_CALL [hash={}]: Send failed: {}, time={:?}",
-            tx_hash_str, error_msg, duration
+            "WALLET_CALL [hash={}, wallet={}]: Send failed: {}, time={:?}",
+            tx_hash_str, wallet_backend.daemon_uri, error_msg, duration
         );
         return Err(error_msg);
     }
