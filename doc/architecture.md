@@ -145,10 +145,10 @@ graph TB
 ### 2. Service Layer (`src/services/`)
 **Responsibility**: Business logic and domain operations
 
-#### Transaction Processing (`transaction_processor.rs`)
+#### Transaction Processing (`transaction.rs`)
 - Single responsibility: Process Ethereum transactions
 - Coordinates between gas validation and wallet operations
-- Handles transaction queuing and sequential processing
+- Handles transaction queuing and concurrent processing (worker pool)
 
 #### Gas Management (`gas_manager.rs`)
 - Single responsibility: Gas price calculation and validation

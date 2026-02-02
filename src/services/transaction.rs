@@ -837,7 +837,7 @@ pub enum GasFeeInfo {
 
 /// Extract gas fee information from a TxEnvelope.
 /// This is the single source of truth for gas fee extraction, used by both
-/// validation functions in transaction.rs and transaction_processor.rs.
+/// gas validation and transaction processing.
 pub fn extract_gas_fees(tx: &TxEnvelope) -> Result<GasFeeInfo, AppError> {
     match tx {
         TxEnvelope::Legacy(signed_tx) => Ok(GasFeeInfo::Legacy {
