@@ -28,11 +28,11 @@ hex = "0.4"
 humantime = "2.1"
 anyhow = "1.0"
 regex = "1"
-kaspa-addresses = { git = "https://github.com/IgraLabs/rusty-kaspa.git", branch = "for-wallet" }
-kaspa-bip32 = { git = "https://github.com/IgraLabs/rusty-kaspa.git", branch = "for-wallet" }
-kaspa-consensus-core = { git = "https://github.com/IgraLabs/rusty-kaspa.git", branch = "for-wallet" }
-kaspa-hashes = { git = "https://github.com/IgraLabs/rusty-kaspa.git", branch = "for-wallet" }
-kaspa-wallet-core = { git = "https://github.com/IgraLabs/rusty-kaspa.git", branch = "for-wallet" }
+kaspa-addresses = { git = "https://github.com/IgraLabs/rusty-kaspa.git"}
+kaspa-bip32 = { git = "https://github.com/IgraLabs/rusty-kaspa.git"}
+kaspa-consensus-core = { git = "https://github.com/IgraLabs/rusty-kaspa.git"}
+kaspa-hashes = { git = "https://github.com/IgraLabs/rusty-kaspa.git"}
+kaspa-wallet-core = { git = "https://github.com/IgraLabs/rusty-kaspa.git"}
 proto = { git = "ssh://git@github.com/IgraLabs/kaswallet.git", package = "kaswallet-proto", branch = "main" }
 once_cell = "1.19"
 rand = "0.8"
