@@ -51,6 +51,8 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tonic = "0.12.3"
 uuid = { version = "1.8.0", features = ["v4"] }
+wasm-bindgen = "=0.2.100"
+js-sys = "=0.3.70"
 
 [dev-dependencies]
 mockito = "1.2"
