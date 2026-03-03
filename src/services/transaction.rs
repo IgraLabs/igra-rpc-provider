@@ -10,8 +10,10 @@ use crate::AppState;
 use alloy::consensus::TxEnvelope;
 use alloy::primitives::{keccak256, B256, U256};
 use alloy::rlp::Decodable;
+use flate2::write::ZlibEncoder;
+use flate2::Compression;
 use serde_json::{json, Value};
-use std::error::Error;
+use std::io::Write;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -520,14 +522,40 @@ pub async fn process_wallet_call(
     // For now, we'll use a mock nonce. In the future, this will be the result of mining.
     let nonce = [0u8, 0u8, 0u8, 1u8];
 
-    // Construct the IgraPayload
+    // Conditionally compress — use zipped only if it actually saves space
+    let (l2_data, tx_type_id) = match compress_zlib(tx_bytes) {
+        Ok(compressed) if compressed.len() < tx_bytes.len() => {
+            debug!(
+                "TX_PROCESSOR: Using ZippedPayload, compressed {}->{} bytes",
+                tx_bytes.len(),
+                compressed.len()
+            );
+            (compressed, TxTypeId::ZippedPayload)
+        }
+        Ok(_) => {
+            debug!(
+                "TX_PROCESSOR: Using UnzippedPayload, {} bytes (compression not beneficial)",
+                tx_bytes.len()
+            );
+            (tx_bytes.to_vec(), TxTypeId::UnzippedPayload)
+        }
+        Err(e) => {
+            warn!(
+                "TX_PROCESSOR: ZLIB compression failed, falling back to unzipped ({} bytes): {e}",
+                tx_bytes.len()
+            );
+            (tx_bytes.to_vec(), TxTypeId::UnzippedPayload)
+        }
+    };
+
     let igra_payload = IgraPayload {
         version: VERSION,
-        tx_type_id: TxTypeId::UnzippedPayload, // later we will support other types
-        l2_data: tx_bytes.to_vec(),
+        tx_type_id,
+        l2_data,
         nonce,
     };
-    let tx_hash = compute_transaction_hash(&igra_payload.l2_data);
+    // Hash the ORIGINAL (uncompressed) bytes — this is the L2 tx hash returned to user
+    let tx_hash = compute_transaction_hash(tx_bytes);
     let tx_hash_str = format!("{tx_hash:#x}");
 
     // Serialize the payload
@@ -543,18 +571,7 @@ pub async fn process_wallet_call(
         }
     };
 
-    // Prepare payload for Kaspa wallet (e.g., zipping)
-    let wallet_payload_bytes = match prepare_payload(&final_payload_bytes) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            let error_message = format!("Failed to prepare payload: {e}");
-            error!(
-                "TX_PROCESSOR [hash={}]: Payload preparation failed: {}",
-                tx_hash_str, error_message
-            );
-            return Err(error_message);
-        }
-    };
+    let wallet_payload_bytes = final_payload_bytes;
 
     // Call the KASPA Wallet for sending the transaction to the Base Layer
     info!(
@@ -618,12 +635,18 @@ pub async fn process_wallet_call(
     Ok(response)
 }
 
-pub fn prepare_payload(tx_bytes: &[u8]) -> Result<Vec<u8>, Box<dyn Error + Sync + Send>> {
-    // For now, we just pass the bytes through without zipping.
-    // The previous implementation of zipping and adding a header is now incorrect
-    // because the new `serialize_payload` function handles the header.
-    // Zipping logic can be re-introduced here if needed for specific TxTypeIds.
-    Ok(tx_bytes.to_vec())
+/// ZLIB compression level — pinned to the standard default (6) so that compressed
+/// payloads are reproducible regardless of future library default changes.
+const ZLIB_COMPRESSION_LEVEL: u32 = 6;
+
+/// Compresses data using ZLIB compression with a fixed level for reproducibility.
+fn compress_zlib(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+    let mut encoder = ZlibEncoder::new(
+        Vec::with_capacity(data.len()),
+        Compression::new(ZLIB_COMPRESSION_LEVEL),
+    );
+    encoder.write_all(data)?;
+    encoder.finish()
 }
 
 /// Serializes an `IgraPayload` into a byte vector according to the new format.
@@ -1327,6 +1350,69 @@ mod tests {
         assert!(
             result.is_ok(),
             "Valid EIP-1559 transaction should pass validation"
+        );
+    }
+
+    #[test]
+    fn test_serialize_payload_zipped() {
+        let payload = IgraPayload {
+            version: 0x9,
+            tx_type_id: TxTypeId::ZippedPayload,
+            l2_data: vec![1, 2, 3, 4],
+            nonce: [5, 6, 7, 8],
+        };
+
+        let result =
+            serialize_payload(&payload).expect("Serialization of a valid payload should not fail");
+
+        // Header byte: version(0x9) << 4 | type(0x5) = 0x95
+        assert_eq!(result[0], 0x95);
+        assert_eq!(result[1..5], [1, 2, 3, 4]);
+        assert_eq!(result[5..9], [5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn test_compress_zlib_deterministic() {
+        let data = vec![
+            0x02, 0xf8, 0x70, 0x00, 0x00, 0x00, 0xab, 0xcd, 0xef, 0x12, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78, 0x9a,
+            0xbc, 0xde, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xab, 0xcd, 0xab, 0xcd, 0xab, 0xcd,
+            0xab, 0xcd, 0xab, 0xcd, 0xab, 0xcd, 0xab, 0xcd, 0xab, 0xcd, 0xab, 0xcd, 0xab, 0xcd,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        let result1 = compress_zlib(&data).expect("Compression should succeed");
+        let result2 = compress_zlib(&data).expect("Compression should succeed");
+        assert_eq!(result1, result2, "ZLIB compression must be deterministic");
+        assert!(
+            result1.len() < data.len(),
+            "Structured data should compress smaller"
+        );
+
+        // Verify round-trip: decompress and compare to original
+        use flate2::read::ZlibDecoder;
+        use std::io::Read;
+        let mut decoder = ZlibDecoder::new(&result1[..]);
+        let mut decompressed = Vec::new();
+        decoder
+            .read_to_end(&mut decompressed)
+            .expect("Decompression should succeed");
+        assert_eq!(
+            decompressed, data,
+            "Round-trip compression must preserve data"
+        );
+    }
+
+    #[test]
+    fn test_compress_zlib_small_data_larger() {
+        // Very small random-like data should compress larger due to ZLIB overhead
+        let small_data = vec![0xab, 0xcd, 0xef];
+        let result = compress_zlib(&small_data).expect("Compression should succeed");
+        assert!(
+            result.len() > small_data.len(),
+            "Small data should be larger after compression"
         );
     }
 }
