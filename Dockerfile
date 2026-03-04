@@ -1,12 +1,9 @@
 # syntax=docker/dockerfile:1
 
 # =============================================================================
-# Stage 1: Chef base with build tools and cargo-chef
+# Stage 1: Builder - compile the application
 # =============================================================================
-FROM rust:slim AS chef
-
-# Install cargo-chef for dependency caching
-RUN cargo install cargo-chef
+FROM rust:slim AS builder
 
 # Install build dependencies and git with SSH support
 RUN apt-get update && \
@@ -24,28 +21,11 @@ RUN mkdir -p /root/.ssh && \
 
 WORKDIR /app
 
-# =============================================================================
-# Stage 2: Planner - extract dependency recipe from Cargo.toml/Cargo.lock
-# =============================================================================
-FROM chef AS planner
-COPY . .
-RUN --mount=type=ssh cargo chef prepare --recipe-path recipe.json
-
-# =============================================================================
-# Stage 3: Builder - build dependencies (cached), then build application
-# =============================================================================
-FROM chef AS builder
-
-# Copy recipe and build dependencies only (this layer is cached if Cargo.toml/Cargo.lock unchanged)
-COPY --from=planner /app/recipe.json recipe.json
-RUN --mount=type=ssh cargo chef cook --release --recipe-path recipe.json
-
-# Now copy source and build application (only this step reruns on source changes)
 COPY . .
 RUN --mount=type=ssh cargo build --release
 
 # =============================================================================
-# Stage 4: Runtime - minimal image with only the binaries
+# Stage 2: Runtime - minimal image with only the binaries
 # =============================================================================
 FROM debian:bookworm-slim
 
