@@ -7,6 +7,9 @@ pub struct ProxyConfig {
     /// EL URL to proxy requests to
     #[serde(alias = "url")]
     pub el_url: String,
+    /// EL WebSocket URL for subscription proxying
+    #[serde(default)]
+    pub el_ws_url: String,
     /// Request timeout in seconds
     #[serde(default = "default_timeout_seconds")]
     pub timeout_seconds: u64,
@@ -23,6 +26,7 @@ impl ProxyConfig {
     pub fn new() -> Self {
         Self {
             el_url: String::new(),
+            el_ws_url: String::new(),
             timeout_seconds: default_timeout_seconds(),
             max_retries: default_max_retries(),
             retry_delay_ms: default_retry_delay_ms(),
@@ -33,6 +37,7 @@ impl ProxyConfig {
     pub fn with_el_url(el_url: String) -> Self {
         Self {
             el_url,
+            el_ws_url: String::new(),
             timeout_seconds: default_timeout_seconds(),
             max_retries: default_max_retries(),
             retry_delay_ms: default_retry_delay_ms(),
@@ -48,6 +53,7 @@ impl ProxyConfig {
     ) -> Self {
         Self {
             el_url,
+            el_ws_url: String::new(),
             timeout_seconds,
             max_retries,
             retry_delay_ms,
@@ -63,6 +69,11 @@ impl ProxyConfig {
         // Validate EL URL format
         if !self.el_url.starts_with("http://") && !self.el_url.starts_with("https://") {
             return Err("EL URL must start with http:// or https://".to_string());
+        }
+
+        // Validate WS URL scheme (only ws:// supported — TLS not enabled for local reth connections)
+        if !self.el_ws_url.is_empty() && !self.el_ws_url.starts_with("ws://") {
+            return Err("EL WS URL must start with ws:// (wss:// is not supported)".to_string());
         }
 
         // Validate timeout is reasonable (1-300 seconds)
@@ -90,6 +101,15 @@ impl ProxyConfig {
         }
 
         Ok(())
+    }
+
+    /// Get the EL WebSocket URL, deriving from el_url if not explicitly set
+    pub fn el_ws_url(&self) -> String {
+        if self.el_ws_url.is_empty() {
+            derive_ws_url(&self.el_url)
+        } else {
+            self.el_ws_url.clone()
+        }
     }
 
     /// Get timeout as Duration
@@ -122,6 +142,35 @@ impl ProxyConfig {
             .saturating_add(retry_overhead)
             .saturating_add(retry_timeouts)
     }
+}
+
+/// Derive a WebSocket URL from an HTTP URL.
+/// Always produces `ws://` since wss:// is not supported for local reth connections.
+/// Replaces port 8545 with 8546 only in the authority section (host:port).
+fn derive_ws_url(http_url: &str) -> String {
+    // Strip the scheme — always use ws:// regardless of http/https
+    let without_scheme = if let Some(rest) = http_url.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = http_url.strip_prefix("http://") {
+        rest
+    } else {
+        http_url
+    };
+
+    // Split authority from path at the first '/'
+    let (authority, path) = match without_scheme.find('/') {
+        Some(idx) => (&without_scheme[..idx], &without_scheme[idx..]),
+        None => (without_scheme, ""),
+    };
+
+    // Replace port 8545→8546 only if it's the trailing port in the authority
+    let authority = if let Some(host) = authority.strip_suffix(":8545") {
+        format!("{host}:8546")
+    } else {
+        authority.to_string()
+    };
+
+    format!("ws://{authority}{path}")
 }
 
 // Default values
@@ -275,5 +324,97 @@ mod tests {
             1000,
         );
         assert!(!config.retries_enabled());
+    }
+
+    #[test]
+    fn test_derive_ws_url_http() {
+        assert_eq!(
+            derive_ws_url("http://localhost:8545"),
+            "ws://localhost:8546"
+        );
+    }
+
+    #[test]
+    fn test_derive_ws_url_https() {
+        // https:// also derives to ws:// since wss:// is not supported
+        assert_eq!(
+            derive_ws_url("https://example.com:8545"),
+            "ws://example.com:8546"
+        );
+    }
+
+    #[test]
+    fn test_derive_ws_url_non_standard_port() {
+        // Port 9545 should not be replaced
+        assert_eq!(
+            derive_ws_url("http://localhost:9545"),
+            "ws://localhost:9545"
+        );
+    }
+
+    #[test]
+    fn test_derive_ws_url_with_path() {
+        assert_eq!(
+            derive_ws_url("http://localhost:8545/rpc"),
+            "ws://localhost:8546/rpc"
+        );
+    }
+
+    #[test]
+    fn test_derive_ws_url_port_in_path_not_replaced() {
+        // Port 8545 appearing in a path segment must NOT be replaced
+        assert_eq!(
+            derive_ws_url("http://localhost:9000/proxy:8545"),
+            "ws://localhost:9000/proxy:8545"
+        );
+    }
+
+    #[test]
+    fn test_el_ws_url_derived_when_empty() {
+        let config = ProxyConfig::with_el_url("http://localhost:8545".to_string());
+        assert_eq!(config.el_ws_url(), "ws://localhost:8546");
+    }
+
+    #[test]
+    fn test_el_ws_url_explicit() {
+        let mut config = ProxyConfig::with_el_url("http://localhost:8545".to_string());
+        config.el_ws_url = "ws://custom-host:9999".to_string();
+        assert_eq!(config.el_ws_url(), "ws://custom-host:9999");
+    }
+
+    #[test]
+    fn test_with_el_url_does_not_eagerly_derive() {
+        let config = ProxyConfig::with_el_url("http://localhost:8545".to_string());
+        // Field should be empty — derivation happens lazily via el_ws_url() accessor
+        assert!(config.el_ws_url.is_empty());
+    }
+
+    #[test]
+    fn test_el_ws_url_validation_invalid_scheme() {
+        let mut config = create_valid_config();
+        config.el_ws_url = "http://localhost:8546".to_string();
+        assert!(config.validate().is_err());
+        assert!(config
+            .validate()
+            .expect_err("Expected validation to fail")
+            .contains("EL WS URL must start with ws://"));
+    }
+
+    #[test]
+    fn test_el_ws_url_validation_valid_ws() {
+        let mut config = create_valid_config();
+        config.el_ws_url = "ws://localhost:8546".to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_el_ws_url_validation_wss_not_supported() {
+        let mut config = create_valid_config();
+        config.el_ws_url = "wss://example.com:8546".to_string();
+        assert!(config.validate().is_err());
+        assert!(config
+            .validate()
+            .expect_err("Expected validation to fail")
+            .contains("wss:// is not supported"));
     }
 }

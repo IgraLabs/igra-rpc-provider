@@ -54,6 +54,7 @@ impl AppConfig {
             ("SERVER_PORT", "server.port"),
             // Proxy configuration (backward compatibility)
             ("EL_URL", "proxy.el_url"),
+            ("EL_WS_URL", "proxy.el_ws_url"),
             ("PROXY_TIMEOUT_SECONDS", "proxy.timeout_seconds"),
             ("PROXY_MAX_RETRIES", "proxy.max_retries"),
             ("PROXY_RETRY_DELAY_MS", "proxy.retry_delay_ms"),

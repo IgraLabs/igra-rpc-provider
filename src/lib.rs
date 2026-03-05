@@ -6,7 +6,7 @@ use crate::clients::wallet_caller::WalletCaller;
 use crate::config::AppConfig;
 use crate::services::{proxy::ProxyService, transaction::TransactionRequest};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 
 pub mod api;
 pub mod clients;
@@ -27,6 +27,8 @@ pub struct AppState {
     pub wallet_caller: Arc<WalletCaller>,
     /// Proxy service for EL client communication
     pub proxy_service: ProxyService,
+    /// Semaphore limiting concurrent WebSocket connections
+    pub ws_semaphore: Arc<Semaphore>,
 }
 
 impl AppState {
@@ -36,12 +38,14 @@ impl AppState {
         transaction_sender: mpsc::Sender<TransactionRequest>,
         wallet_caller: Arc<WalletCaller>,
         proxy_service: ProxyService,
+        ws_semaphore: Arc<Semaphore>,
     ) -> Self {
         Self {
             config,
             transaction_sender,
             wallet_caller,
             proxy_service,
+            ws_semaphore,
         }
     }
 }

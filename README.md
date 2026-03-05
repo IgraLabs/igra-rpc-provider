@@ -55,6 +55,7 @@ See `tx_perf` usage and examples in [doc/tx-perf-cli.md](doc/tx-perf-cli.md).
   - Calls the KASPA Wallet for transaction submission to the Base Layer (KASPA DAG).
   - Returns transaction hash only if all checks pass and the transaction gets submitted.
 ✅ **Read-Only Mode**: When enabled via `READ_ONLY=true`, blocks all write operations (`eth_sendRawTransaction`, `personal_*`, `admin_*`).
+✅ **WebSocket Support**: Full WebSocket proxy on `GET /` — subscriptions (`eth_subscribe`/`eth_unsubscribe`) relay through reth WS, all other methods use the same routing as HTTP (including `eth_sendRawTransaction` → L1 pipeline and gas price floor).
 ✅ **Health Endpoint**: `GET /health` verifies EL connectivity for load balancer health checks.
 ✅ Structured Logging: Uses `tracing` for detailed logs.
 ✅ Error Handling: Mimics standard Ethereum JSON-RPC error responses.
@@ -180,6 +181,7 @@ To migrate:
 | `WALLET_DAEMON_URI`     | URI of the Kaspa Wallet daemon           | -                                |
 | `READ_ONLY`             | Enable read-only mode (blocks writes)    | `false`                          |
 | `TX_ID_PREFIX`          | Required prefix for mined transaction IDs (hex string, e.g., "97b1" or "0x97b1")| `97b1`                   |
+| `EL_WS_URL`             | WebSocket URL of the IGRA EL Client      | Derived from `EL_URL` (ws://, port 8546) |
 | `MINING_TIMEOUT_SECONDS`| Mining timeout in seconds (1-300)        | `10`                             |
 
 Example: Run with a custom node URL.
@@ -315,7 +317,7 @@ You should receive a JSON response containing the block number.
 ---
 
 ## 🛠 Known Issues and Future Improvements
-- `wss:\\` protocol shall be supported for JSON-RPC requests.
+- `wss://` protocol is not yet supported for the upstream reth WebSocket connection (only `ws://` for local/Docker reth connections).
 - Interface with KASPA Wallet needs to be improved.
 
 ---
