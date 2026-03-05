@@ -28,8 +28,11 @@ The IGRA RPC Provider is a JSON-RPC proxy service designed with Domain-Driven De
 ```mermaid
 graph TB
     subgraph "API Layer"
-        A[HTTP Request] --> B[RPC Handler]
-        B --> C[Request Validation]
+        A[HTTP POST /] --> B[RPC Handler]
+        A2[WS GET /] --> B2[WS Handler]
+        B --> C[Shared Routing]
+        B2 -->|regular RPC| C
+        B2 -->|eth_subscribe| D2[Reth WS Relay]
         C --> D[Method Routing]
     end
     
@@ -136,11 +139,12 @@ graph TB
 ## Domain Structure
 
 ### 1. API Layer (`src/api/`)
-**Responsibility**: Handle HTTP requests and responses
-- `rpc.rs`: JSON-RPC request handling and routing
-- Clean separation of HTTP concerns from business logic
-- Request validation and error formatting
-- Read-only mode enforcement for write operations
+**Responsibility**: Handle HTTP and WebSocket requests
+- `routing.rs`: Shared routing logic — single source of truth for validation, method dispatch, and logging (used by both HTTP and WS handlers)
+- `rpc.rs`: HTTP JSON-RPC request handler (POST /)
+- `ws.rs`: WebSocket handler (GET / with upgrade) — subscriptions relay to reth WS, regular RPC calls go through shared routing
+- `health.rs`: Health check endpoint
+- Request validation (whitelist, read-only mode) and error formatting
 
 ### 2. Service Layer (`src/services/`)
 **Responsibility**: Business logic and domain operations

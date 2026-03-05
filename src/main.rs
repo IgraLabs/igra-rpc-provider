@@ -16,6 +16,7 @@ use igra_rpc_provider::{
 use std::net::{IpAddr, SocketAddr};
 use std::process;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tracing::{debug, error, info};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -47,6 +48,7 @@ async fn main() -> Result<(), AppError> {
     info!("IGRA RPC PROVIDER STARTING");
     info!("Listening on: {}", addr);
     info!("EL client URL: {}", config.el_url());
+    info!("EL WebSocket URL: {}", config.proxy.el_ws_url());
     info!("KASPA wallet: {}", config.wallet.wallet_daemon_uri);
 
     // Start the transaction processor and get the sender
@@ -67,16 +69,19 @@ async fn main() -> Result<(), AppError> {
     let proxy_service = ProxyService::new(config.el_url().to_string(), gas_price_service);
 
     // Set up the shared application state
+    let ws_semaphore = Arc::new(Semaphore::new(api::ws::MAX_WS_CONNECTIONS));
     let state = Arc::new(AppState::new(
         config,
         transaction_sender,
         wallet_caller,
         proxy_service,
+        ws_semaphore,
     ));
 
     // Build the Axum router
     let app = Router::new()
         .route("/", post(api::rpc::handle_rpc))
+        .route("/", get(api::ws::handle_ws_upgrade))
         .route("/health", get(api::health::health_check))
         .with_state(state);
 

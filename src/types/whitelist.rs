@@ -44,8 +44,10 @@ pub static ALLOWED_METHODS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     methods.insert("eth_newPendingTransactionFilter");
     methods.insert("eth_protocolVersion");
     methods.insert("eth_sendRawTransaction");
+    methods.insert("eth_subscribe");
     methods.insert("eth_syncing");
     methods.insert("eth_uninstallFilter");
+    methods.insert("eth_unsubscribe");
 
     // Standard net_ methods
     methods.insert("net_listening");
