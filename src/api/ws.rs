@@ -11,17 +11,21 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{future::join_all, SinkExt, StreamExt};
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite;
 use tracing::{error, info, warn};
 
 /// Maximum concurrent WebSocket connections.
 pub const MAX_WS_CONNECTIONS: usize = 1024;
+
+/// Maximum concurrent in-flight RPC requests per WebSocket connection.
+const MAX_INFLIGHT_REQUESTS: usize = 64;
 
 /// Timeout for connecting to the upstream reth WebSocket.
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -67,6 +71,10 @@ pub async fn handle_ws_upgrade(
 /// all incoming JSON-RPC messages:
 /// - `eth_subscribe` / `eth_unsubscribe` are forwarded to the reth WS connection
 /// - All other methods go through the shared `routing::route_and_process()` path
+///
+/// Note: non-subscription responses may arrive out of order relative to the
+/// request sequence, as they are processed concurrently. Clients must match
+/// responses by their JSON-RPC `id` field.
 async fn handle_ws_connection(
     client_ws: WebSocket,
     state: Arc<AppState>,
@@ -150,8 +158,21 @@ async fn handle_ws_connection(
         info!(conn_id = relay_conn_id, "Reth->client relay task ended");
     });
 
+    // Track spawned RPC tasks for cleanup and panic detection
+    let mut in_flight = JoinSet::new();
+    let inflight_semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_REQUESTS));
+
     // Main loop: read from client with idle timeout
     loop {
+        // Drain completed tasks and log any panics
+        while let Some(result) = in_flight.try_join_next() {
+            if let Err(e) = result {
+                if e.is_panic() {
+                    error!(conn_id, "Spawned RPC task panicked: {e}");
+                }
+            }
+        }
+
         let msg_result = match tokio::time::timeout(WS_IDLE_TIMEOUT, client_read.next()).await {
             Ok(Some(msg)) => msg,
             Ok(None) => break, // stream ended
@@ -193,10 +214,40 @@ async fn handle_ws_connection(
 
         match envelope {
             RpcEnvelope::Single(req) => {
-                let connection_ok =
-                    process_ws_request(&state, req, &mut reth_write, &client_tx).await;
-                if !connection_ok {
-                    break;
+                if is_subscription_method(&req.method) {
+                    // Subscriptions need &mut reth_write -- must stay sequential
+                    let connection_ok =
+                        process_subscription_request(&state, req, &mut reth_write, &client_tx)
+                            .await;
+                    if !connection_ok {
+                        break;
+                    }
+                } else {
+                    // Non-subscription requests are spawned concurrently so the
+                    // main loop can immediately read the next message.
+                    // Use try_acquire to avoid blocking the main loop (which
+                    // would stall subscription message reads).
+                    let permit = match inflight_semaphore.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            let error_response = routing::json_rpc_error(
+                                req.id.clone(),
+                                -32005,
+                                "Server busy, too many in-flight requests",
+                            );
+                            if !send_value(&client_tx, &error_response).await {
+                                break;
+                            }
+                            continue;
+                        }
+                    };
+                    let state = Arc::clone(&state);
+                    let client_tx = client_tx.clone();
+                    in_flight.spawn(async move {
+                        let response = routing::route_and_process(&state, req).await;
+                        let _ = send_value(&client_tx, &response).await;
+                        drop(permit); // held until task completes
+                    });
                 }
             }
             RpcEnvelope::Batch(requests) => {
@@ -212,19 +263,41 @@ async fn handle_ws_connection(
                     continue;
                 }
 
-                let mut responses = Vec::with_capacity(requests.len());
-                for req in requests {
-                    responses.push(process_ws_request_value(&state, req).await);
-                }
-
-                if !send_value(&client_tx, &Value::Array(responses)).await {
-                    break;
-                }
+                // Acquire permits proportional to batch size so the semaphore
+                // accurately reflects the number of concurrent HTTP round-trips.
+                let batch_len = requests.len().min(MAX_INFLIGHT_REQUESTS) as u32;
+                let permit = match inflight_semaphore.clone().try_acquire_many_owned(batch_len)
+                {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        let error_response = routing::json_rpc_error(
+                            Value::Null,
+                            -32005,
+                            "Server busy, too many in-flight requests",
+                        );
+                        if !send_value(&client_tx, &error_response).await {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                let state = Arc::clone(&state);
+                let client_tx = client_tx.clone();
+                in_flight.spawn(async move {
+                    let futs: Vec<_> = requests
+                        .into_iter()
+                        .map(|req| process_ws_request_value(&state, req))
+                        .collect();
+                    let responses = join_all(futs).await;
+                    let _ = send_value(&client_tx, &Value::Array(responses)).await;
+                    drop(permit); // held until all batch items complete
+                });
             }
         }
     }
 
-    // Clean up: close reth WS, signal writer, abort relay
+    // Clean up: abort in-flight tasks, close reth WS, signal writer, abort relay
+    in_flight.abort_all();
     let _ = reth_write.send(tungstenite::Message::Close(None)).await;
     drop(client_tx);
     relay_task.abort();
@@ -252,29 +325,21 @@ type RethWsWriter = futures_util::stream::SplitSink<
     tungstenite::Message,
 >;
 
-/// Process a single WS request. Returns `false` if the connection should be closed
-/// (i.e. the client channel is gone or the reth upstream broke).
-///
-/// Subscription methods (`eth_subscribe`/`eth_unsubscribe`) are forwarded directly
-/// to the reth WS connection. All other methods go through `routing::route_and_process()`.
-async fn process_ws_request(
+/// Process a subscription request (`eth_subscribe` / `eth_unsubscribe`).
+/// Returns `false` if the connection should be closed (i.e. the client
+/// channel is gone or the reth upstream broke).
+async fn process_subscription_request(
     state: &Arc<AppState>,
     req: RpcRequest,
     reth_write: &mut RethWsWriter,
     client_tx: &mpsc::Sender<String>,
 ) -> bool {
-    if is_subscription_method(&req.method) {
-        // Validate authorization before forwarding to reth
-        if let Some(error_response) = routing::validate_request(state, &req) {
-            return send_value(client_tx, &error_response).await;
-        }
-        // Forward to reth WS -- response will come back via the relay task
-        return forward_to_reth(reth_write, &req).await;
+    // Validate authorization before forwarding to reth
+    if let Some(error_response) = routing::validate_request(state, &req) {
+        return send_value(client_tx, &error_response).await;
     }
-
-    // Route through shared logic (same path as HTTP)
-    let response = routing::route_and_process(state, req).await;
-    send_value(client_tx, &response).await
+    // Forward to reth WS -- response will come back via the relay task
+    forward_to_reth(reth_write, &req).await
 }
 
 /// Process a single WS request and return the response as a Value.
