@@ -265,9 +265,9 @@ async fn handle_ws_connection(
 
                 // Acquire permits proportional to batch size so the semaphore
                 // accurately reflects the number of concurrent HTTP round-trips.
+                #[allow(clippy::cast_possible_truncation)] // MAX_INFLIGHT_REQUESTS (64) fits in u32
                 let batch_len = requests.len().min(MAX_INFLIGHT_REQUESTS) as u32;
-                let permit = match inflight_semaphore.clone().try_acquire_many_owned(batch_len)
-                {
+                let permit = match inflight_semaphore.clone().try_acquire_many_owned(batch_len) {
                     Ok(permit) => permit,
                     Err(_) => {
                         let error_response = routing::json_rpc_error(
