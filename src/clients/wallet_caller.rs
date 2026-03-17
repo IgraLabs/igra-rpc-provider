@@ -10,10 +10,11 @@ use proto::kaswallet_proto::{
 use std::env;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, instrument, warn};
 
 const PASSWORD_ENV_VAR: &str = "KASWALLET_PASSWORD";
+const GRPC_TIMEOUT_SECS: u64 = 30;
 
 /// Parameters for creating a transaction
 #[derive(Debug, Clone)]
@@ -218,12 +219,15 @@ impl WalletCaller {
 
         let mut wallet_daemon_client = self.wallet_daemon_client.lock().await;
 
-        let response = wallet_daemon_client
-            .create_unsigned_transactions(CreateUnsignedTransactionsRequest {
+        let response = match timeout(
+            Duration::from_secs(GRPC_TIMEOUT_SECS),
+            wallet_daemon_client.create_unsigned_transactions(CreateUnsignedTransactionsRequest {
                 transaction_description,
-            })
-            .await
-            .map_err(|e| {
+            }),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(|e| {
                 if Self::is_no_funds_error(&e) {
                     error!("UTXO exhaustion detected: {}", e.message());
                     info!(
@@ -234,7 +238,18 @@ impl WalletCaller {
                     );
                 }
                 WalletCallerError::TransactionCreationFailed(e)
-            })?;
+            })?,
+            Err(_) => {
+                warn!(
+                    "gRPC create_unsigned_transactions timed out after {}s",
+                    GRPC_TIMEOUT_SECS
+                );
+                return Err(WalletCallerError::GrpcTimeout {
+                    operation: "create_unsigned_transactions",
+                    timeout_seconds: GRPC_TIMEOUT_SECS,
+                });
+            }
+        };
 
         let unsigned_transactions = response.into_inner().unsigned_transactions;
         debug!(
@@ -256,13 +271,24 @@ impl WalletCaller {
     ) -> Result<Vec<WalletSignableTransaction>, WalletCallerError> {
         let mut wallet_daemon_client = self.wallet_daemon_client.lock().await;
 
-        let response = wallet_daemon_client
-            .sign(SignRequest {
+        let response = match timeout(
+            Duration::from_secs(GRPC_TIMEOUT_SECS),
+            wallet_daemon_client.sign(SignRequest {
                 unsigned_transactions,
                 password: self.password.clone(),
-            })
-            .await
-            .map_err(WalletCallerError::TransactionSigningFailed)?;
+            }),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(WalletCallerError::TransactionSigningFailed)?,
+            Err(_) => {
+                warn!("gRPC sign timed out after {}s", GRPC_TIMEOUT_SECS);
+                return Err(WalletCallerError::GrpcTimeout {
+                    operation: "sign",
+                    timeout_seconds: GRPC_TIMEOUT_SECS,
+                });
+            }
+        };
 
         let transactions = response.into_inner().signed_transactions;
         debug!("Signed {} transactions", transactions.len());
@@ -278,12 +304,23 @@ impl WalletCaller {
     ) -> Result<Vec<String>, WalletCallerError> {
         let mut wallet_daemon_client = self.wallet_daemon_client.lock().await;
 
-        let response = wallet_daemon_client
-            .broadcast(BroadcastRequest {
+        let response = match timeout(
+            Duration::from_secs(GRPC_TIMEOUT_SECS),
+            wallet_daemon_client.broadcast(BroadcastRequest {
                 transactions: signed_transactions,
-            })
-            .await
-            .map_err(WalletCallerError::TransactionBroadcastFailed)?;
+            }),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(WalletCallerError::TransactionBroadcastFailed)?,
+            Err(_) => {
+                warn!("gRPC broadcast timed out after {}s", GRPC_TIMEOUT_SECS);
+                return Err(WalletCallerError::GrpcTimeout {
+                    operation: "broadcast",
+                    timeout_seconds: GRPC_TIMEOUT_SECS,
+                });
+            }
+        };
 
         let transaction_ids = response.into_inner().transaction_ids;
         debug!(
@@ -429,6 +466,12 @@ pub enum WalletCallerError {
 
     #[error("Failed to extract signable transaction: {0}")]
     TransactionExtractionFailed(String),
+
+    #[error("Wallet gRPC call '{operation}' timed out after {timeout_seconds}s")]
+    GrpcTimeout {
+        operation: &'static str,
+        timeout_seconds: u64,
+    },
 }
 
 // Conversion to AppError for consistent error handling across the application
@@ -473,6 +516,12 @@ impl From<WalletCallerError> for crate::error::AppError {
             WalletCallerError::TransactionExtractionFailed(e) => {
                 crate::error::AppError::WalletError(format!("Transaction extraction failed: {e}"))
             }
+            WalletCallerError::GrpcTimeout {
+                operation,
+                timeout_seconds,
+            } => crate::error::AppError::WalletError(format!(
+                "Wallet gRPC {operation} timed out after {timeout_seconds}s"
+            )),
         }
     }
 }
