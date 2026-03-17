@@ -15,12 +15,21 @@ use flate2::Compression;
 use serde_json::{json, Value};
 use std::io::Write;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 /// The version of the IgraPayload format
 pub const VERSION: u8 = 0x9;
+
+/// Maximum number of transactions that can be queued for sequential processing.
+const TRANSACTION_QUEUE_CAPACITY: usize = 1024;
+
+/// Maximum time (in seconds) to wait for a queued transaction to be processed
+/// before returning a timeout error to the caller.
+const PROCESSING_TIMEOUT_SECS: u64 = 120;
 
 /// Transaction type constants for Ethereum transaction types
 pub mod tx_types {
@@ -80,10 +89,11 @@ pub struct TransactionRequest {
 /// Creates and starts the background transaction processor
 /// Returns a channel sender that can be used to queue transactions
 pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<TransactionRequest> {
-    let (transaction_sender, mut transaction_receiver) = mpsc::channel::<TransactionRequest>(1024);
+    let (transaction_sender, mut transaction_receiver) =
+        mpsc::channel::<TransactionRequest>(TRANSACTION_QUEUE_CAPACITY);
     info!(
         "TX_PROCESSOR: Starting transaction processor with queue size={}",
-        1024
+        TRANSACTION_QUEUE_CAPACITY
     );
 
     // Start the sequential transaction processor task
@@ -310,19 +320,41 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
             e,
             state.transaction_sender.capacity()
         );
-        // Even if queueing fails, we still return the hash to the user
-    } else {
-        let queue_time = queue_start.elapsed();
-        info!(
-            "TX [id={}, hash={}]: Transaction queued successfully, queue_time={:?}, available_capacity={}",
-            id, tx_hash_str, queue_time, state.transaction_sender.capacity()
-        );
+        return TransactionError::queue_full(TRANSACTION_QUEUE_CAPACITY)
+            .to_json_rpc_error(id_value);
     }
+    let queue_time = queue_start.elapsed();
+    info!(
+        "TX [id={}, hash={}]: Transaction queued successfully, queue_time={:?}, available_capacity={}",
+        id, tx_hash_str, queue_time, state.transaction_sender.capacity()
+    );
 
-    let response = response_receiver
-        .recv()
-        .await
-        .expect("Failed to receive response from transaction processor");
+    let response = match timeout(
+        Duration::from_secs(PROCESSING_TIMEOUT_SECS),
+        response_receiver.recv(),
+    )
+    .await
+    {
+        Ok(Some(result)) => result,
+        Ok(None) => {
+            error!(
+                "TX [id={}, hash={}]: Response channel closed unexpectedly (processor may have crashed)",
+                id, tx_hash_str
+            );
+            return TransactionError::InternalError(
+                "Transaction processor channel closed unexpectedly".to_string(),
+            )
+            .to_json_rpc_error(id_value);
+        }
+        Err(_) => {
+            error!(
+                "TX [id={}, hash={}]: Processing timed out after {}s",
+                id, tx_hash_str, PROCESSING_TIMEOUT_SECS
+            );
+            return TransactionError::processing_timeout(PROCESSING_TIMEOUT_SECS)
+                .to_json_rpc_error(id_value);
+        }
+    };
 
     if let Err(e) = response {
         return json!({
