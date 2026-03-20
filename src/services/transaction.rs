@@ -590,7 +590,12 @@ pub async fn process_wallet_call(
         wallet_payload_bytes.len()
     );
 
-    let wallet_caller = app_state.wallet_caller.clone();
+    let wallet_caller = match app_state.wallet_caller.clone() {
+        Some(wc) => wc,
+        None => {
+            return Err("Wallet is not available: server is running in read-only mode".to_string());
+        }
+    };
 
     // Actually send the transaction
     info!(
