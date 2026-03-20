@@ -55,14 +55,18 @@ async fn main() -> Result<(), AppError> {
     let transaction_sender = start_transaction_processor(config.clone());
     info!("Transaction processor started");
 
-    let wallet_caller_result = WalletCaller::new(config.wallet.clone()).await;
-    if let Err(err) = wallet_caller_result {
-        error!("Failed to create WalletCaller: {}", err);
-        return Ok(());
-    }
-    let wallet_caller = Arc::new(
-        wallet_caller_result.expect("WalletCaller should have been successfully initialized"),
-    );
+    let wallet_caller: Option<Arc<WalletCaller>> = if config.security.is_read_only() {
+        info!("Read-only mode enabled — skipping wallet initialization");
+        None
+    } else {
+        match WalletCaller::new(config.wallet.clone()).await {
+            Ok(caller) => Some(Arc::new(caller)),
+            Err(err) => {
+                error!("Failed to create WalletCaller: {}", err);
+                return Ok(());
+            }
+        }
+    };
 
     // Create the new services using dependency injection
     let gas_price_service = GasPriceService::new(config.gas.clone());

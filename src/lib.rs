@@ -24,7 +24,7 @@ pub struct AppState {
     /// Channel for transaction processing
     pub transaction_sender: mpsc::Sender<TransactionRequest>,
     /// Wallet caller for Kaspa wallet operations
-    pub wallet_caller: Arc<WalletCaller>,
+    pub wallet_caller: Option<Arc<WalletCaller>>,
     /// Proxy service for EL client communication
     pub proxy_service: ProxyService,
     /// Semaphore limiting concurrent WebSocket connections
@@ -36,7 +36,7 @@ impl AppState {
     pub fn new(
         config: AppConfig,
         transaction_sender: mpsc::Sender<TransactionRequest>,
-        wallet_caller: Arc<WalletCaller>,
+        wallet_caller: Option<Arc<WalletCaller>>,
         proxy_service: ProxyService,
         ws_semaphore: Arc<Semaphore>,
     ) -> Self {
