@@ -32,6 +32,7 @@ pub static ALLOWED_METHODS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     methods.insert("eth_getRawTransactionByHash");
     methods.insert("eth_getTransactionCount");
     methods.insert("eth_getTransactionReceipt");
+    methods.insert("eth_getBlockReceipts");
     methods.insert("eth_getUncleByBlockHashAndIndex");
     methods.insert("eth_getUncleByBlockNumberAndIndex");
     methods.insert("eth_getUncleCountByBlockHash");

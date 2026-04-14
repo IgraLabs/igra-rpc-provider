@@ -24,8 +24,6 @@ db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 ignore = [
     "RUSTSEC-2024-0384", # instant is unmaintained
-    "RUSTSEC-2025-0010", # ring 0.16 unmaintained
-    "RUSTSEC-2025-0009", # ring 0.16 AES vulnerability
     "RUSTSEC-2021-0145", # atty potential unaligned read (Windows only, not critical for our use case)
     "RUSTSEC-2024-0375", # atty unmaintained (indirect dependency, will be phased out)
     "RUSTSEC-2024-0388", # derivative unmaintained (indirect dependency from kaspa crates)
@@ -33,9 +31,9 @@ ignore = [
     "RUSTSEC-2024-0370", # proc-macro-error unmaintained (indirect dependency)
     "RUSTSEC-2024-0436", # paste is unmaintained (project archived, but widely used and stable)
     "RUSTSEC-2025-0052", # async-std is discontinued (indirect dependency from kaspa crates)
-    "RUSTSEC-2025-0057", # fxhash is unmaintained (indirect dependency from ethers crate)
     "RUSTSEC-2025-0134", # rustls-pemfile unmaintained (indirect dependency from tonic)
     "RUSTSEC-2025-0141", # bincode unmaintained (indirect dependency from kaspa crates)
+    "RUSTSEC-2026-0097", # rand unsound with custom logger (indirect dependency, conditions not met in our code)
 ]
 yanked = "warn"
 
