@@ -40,7 +40,7 @@ graph TB
         D --> E[Transaction Service]
         D --> F[Proxy Service]
         E --> G[Gas Manager]
-        E --> H[Wallet Service]
+        E --> H[Wallet Caller]
         F --> I[EL Proxy]
     end
     
@@ -62,11 +62,15 @@ graph TB
         P --> S[Wallet Config]
         P --> T[Proxy Config]
         P --> U[Security Config]
-        P --> V[Mining Config]
+        P --> V[IGRA Lane Config]
     end
 ```
 
 ### Service Interaction Flow
+
+The wallet-call sequence below shows the post-Toccata IGRA lane flow:
+build an unsigned tx in the configured lane via kaswallet, validate it
+against the local `IGRA_LANE_ID`, sign, and broadcast.
 
 ```mermaid
 sequenceDiagram
@@ -74,10 +78,10 @@ sequenceDiagram
     participant API as RPC Handler
     participant TxService as Transaction Service
     participant GasManager as Gas Manager
-    participant WalletService as Wallet Service
+    participant WalletCaller as Wallet Caller
     participant ProxyService as Proxy Service
     participant EL as Execution Layer
-    participant Wallet as Kaspa Wallet
+    participant Wallet as Kaspa Wallet (kaswallet daemon)
     
     Client->>API: eth_sendRawTransaction
     API->>API: Validate Request
@@ -86,10 +90,15 @@ sequenceDiagram
     GasManager->>EL: Fetch Current Gas Price
     EL-->>GasManager: Gas Price Data
     GasManager-->>TxService: Validated Gas
-    TxService->>WalletService: Send Transaction
-    WalletService->>Wallet: Submit Transaction
-    Wallet-->>WalletService: Transaction Hash
-    WalletService-->>TxService: Result
+    TxService->>WalletCaller: create_sign_and_broadcast_igra_lane_transaction(params)
+    WalletCaller->>Wallet: CreateUnsignedTransactions
+    Wallet-->>WalletCaller: WalletSignableTransaction (v1, on IGRA lane)
+    WalletCaller->>WalletCaller: validate_lane_transaction (version, subnetwork_id, payload, ComputeBudget mass)
+    WalletCaller->>Wallet: Sign
+    Wallet-->>WalletCaller: Signed Transaction
+    WalletCaller->>Wallet: Broadcast
+    Wallet-->>WalletCaller: Transaction ID
+    WalletCaller-->>TxService: Result (or LaneValidationFailed)
     TxService-->>API: Transaction Hash
     API-->>Client: JSON-RPC Response
     
@@ -110,14 +119,15 @@ graph TB
         AppServices --> TransactionProcessor
         AppServices --> GasManager
         AppServices --> ProxyService
-        AppServices --> WalletService
+        AppServices --> WalletCaller
     end
     
     subgraph "Service Dependencies"
         TransactionProcessor --> AppConfig
         GasManager --> GasConfig
         ProxyService --> ProxyConfig
-        WalletService --> WalletConfig
+        WalletCaller --> WalletConfig
+        WalletCaller --> IgraConfig
     end
     
     subgraph "Configuration Dependencies"
@@ -126,12 +136,12 @@ graph TB
         AppConfig --> WalletConfig
         AppConfig --> ProxyConfig
         AppConfig --> SecurityConfig
-        AppConfig --> MiningConfig
+        AppConfig --> IgraConfig
     end
     
     subgraph "External Dependencies"
         GasManager --> ELClient[EL Client]
-        WalletService --> WalletCaller[Wallet Caller]
+        WalletCaller --> KaswalletDaemon[Kaswallet Daemon]
         ProxyService --> ELProxy[EL Proxy]
     end
 ```
@@ -164,10 +174,15 @@ graph TB
 - Handle EL-specific transformations
 - Manage connection and retry logic
 
-#### Wallet Service (`wallet_service.rs`)
-- Single responsibility: Wallet operations and communication
-- Abstract wallet implementation details
-- Handle transaction submission and status
+#### Wallet Caller (`src/clients/wallet_caller.rs`)
+- Single responsibility: Talk to the kaswallet daemon and enforce the
+  IGRA-lane invariant before signing
+- Builds an unsigned transaction via the daemon's `CreateUnsignedTransactions`
+  RPC, validates every returned tx against the configured `IGRA_LANE_ID`
+  (version, subnetwork_id, payload, per-input `ComputeBudget` mass, bounded
+  outputs, zero `lock_time`/`gas`), then signs and broadcasts
+- Carries an independent `[u8; 20]` copy of the lane id so a misconfigured
+  or misbehaving daemon can't get a signature on a wrong-lane transaction
 
 ### 3. Configuration Layer (`src/config/`)
 **Responsibility**: Domain-specific configuration management
@@ -179,14 +194,14 @@ graph TB
     AppConfig --> WalletConfig[Wallet Config]
     AppConfig --> ProxyConfig[Proxy Config]
     AppConfig --> SecurityConfig[Security Config]
-    AppConfig --> MiningConfig[Mining Config]
+    AppConfig --> IgraConfig[IGRA Lane Config]
     
     ServerConfig --> ServerValidation[Host/Port Validation]
     GasConfig --> GasValidation[Gas Price Validation]
     WalletConfig --> WalletValidation[URI Validation]
     ProxyConfig --> ProxyValidation[Timeout/Retry Validation]
     SecurityConfig --> SecurityValidation[Whitelist/Read-Only Validation]
-    MiningConfig --> MiningValidation[Difficulty Validation]
+    IgraConfig --> IgraValidation[Lane ID Validation (KIP-21 namespace)]
 ```
 
 ### 4. Error Handling (`src/errors/`)

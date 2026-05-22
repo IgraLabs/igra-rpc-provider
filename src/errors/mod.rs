@@ -56,7 +56,6 @@ impl ToJsonRpcError for TransactionError {
             TransactionError::SignatureVerificationFailed(_) => -32602, // Invalid params
             TransactionError::QueueFull { .. } => -32000,  // Server error
             TransactionError::ProcessingTimeout { .. } => -32000, // Server error
-            TransactionError::MiningFailed(_) => -32000,   // Server error
             TransactionError::WalletOperationFailed(_) => -32000, // Server error
             TransactionError::AlreadyExists { .. } => -32000, // Server error
             TransactionError::TransactionExpired { .. } => -32000, // Server error
@@ -187,7 +186,6 @@ impl ToJsonRpcError for WalletError {
             WalletError::TransactionSigningFailed(_) => -32000, // Server error
             WalletError::WalletNotFound { .. } => -32000, // Server error
             WalletError::AddressGenerationFailed(_) => -32000, // Server error
-            WalletError::MiningFailed(_) => -32000,       // Server error
             WalletError::BroadcastFailed(_) => -32000,    // Server error
             WalletError::UtxoSelectionFailed(_) => -32000, // Server error
             WalletError::FeeCalculationFailed(_) => -32000, // Server error

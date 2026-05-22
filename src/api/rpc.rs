@@ -39,7 +39,7 @@ pub async fn handle_rpc(
 mod tests {
     use crate::api::routing::{json_rpc_error, PayloadInfo, RequestContext};
     use crate::config::{
-        AppConfig, GasConfig, MiningConfig, ProxyConfig, RetryConfig, SecurityConfig, ServerConfig,
+        AppConfig, GasConfig, IgraConfig, ProxyConfig, RetryConfig, SecurityConfig, ServerConfig,
         WalletConfig,
     };
     use crate::error::AppError;
@@ -80,13 +80,13 @@ mod tests {
                 proxy: ProxyConfig::with_el_url("http://localhost:12345".to_string()),
                 wallet: WalletConfig {
                     wallet_daemon_uri: "http://localhost:8082".to_string(),
-                    to_address: "".to_string(),
+                    to_address: String::new(),
                 },
                 security: SecurityConfig {
                     enable_whitelist: self.enable_whitelist,
                     read_only: self.read_only,
                 },
-                mining: MiningConfig::default(),
+                igra: IgraConfig::from_namespace([0x97, 0xb1, 0x00, 0x00]),
                 gas: GasConfig::default(),
                 retry: RetryConfig::default(),
             }

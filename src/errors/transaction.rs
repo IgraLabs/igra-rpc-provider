@@ -58,10 +58,6 @@ pub enum TransactionError {
     #[error("Transaction processing timed out after {timeout_seconds} seconds")]
     ProcessingTimeout { timeout_seconds: u64 },
 
-    /// Mining operation failed
-    #[error("Transaction mining failed: {0}")]
-    MiningFailed(String),
-
     /// Wallet operation failed
     #[error("Wallet operation failed: {0}")]
     WalletOperationFailed(String),
@@ -198,7 +194,6 @@ impl TransactionError {
             TransactionError::QueueFull { .. }
                 | TransactionError::ProcessingTimeout { .. }
                 | TransactionError::InternalError(_)
-                | TransactionError::MiningFailed(_)
                 | TransactionError::WalletOperationFailed(_)
         )
     }
@@ -240,7 +235,6 @@ impl TransactionError {
             TransactionError::InvalidNonce { .. } => "INVALID_NONCE",
             TransactionError::QueueFull { .. } => "QUEUE_FULL",
             TransactionError::ProcessingTimeout { .. } => "PROCESSING_TIMEOUT",
-            TransactionError::MiningFailed(_) => "MINING_FAILED",
             TransactionError::WalletOperationFailed(_) => "WALLET_OPERATION_FAILED",
             TransactionError::InvalidFormat(_) => "INVALID_FORMAT",
             TransactionError::AlreadyExists { .. } => "ALREADY_EXISTS",

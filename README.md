@@ -165,11 +165,19 @@ cargo test
 
 ### Breaking Changes
 
-**v0.3.0**: The environment variable `MINING_REQUIRED_PREFIX` has been renamed to `TX_ID_PREFIX` and the config field `mining.required_prefix` is now `mining.tx_id_prefix`.
+**Post-Toccata**: Lane binding is now first-class on the consensus
+side via `Transaction.subnetwork_id`; the previous pre-Toccata
+selection mechanism (matching a transaction-id prefix in the payload)
+has been removed entirely. Set `IGRA_LANE_ID` (or the `[igra]` section
+in `config.toml`) instead, and make sure the connected kaswallet
+daemon is configured with the matching `KASWALLET_SUBNETWORK_ID`.
 
 To migrate:
-- Environment variables: `MINING_REQUIRED_PREFIX` → `TX_ID_PREFIX`
-- config.toml: `[mining] required_prefix` → `[mining] tx_id_prefix`
+- Remove the legacy mining-related section from `config.toml` and any
+  related environment variables (the old prefix and mining-timeout
+  knobs are gone).
+- Add `[igra] lane_id = "97b10000"` (or whatever 4-byte namespace your
+  deployment uses) to `config.toml`, or set `IGRA_LANE_ID=97b10000`.
 
 ### Environment Variables
 
@@ -180,9 +188,17 @@ To migrate:
 | `EL_URL`                | URL of the IGRA EL Client                | `http://127.0.0.1:8545`          |
 | `WALLET_DAEMON_URI`     | URI of the Kaspa Wallet daemon           | -                                |
 | `READ_ONLY`             | Enable read-only mode (blocks writes)    | `false`                          |
-| `TX_ID_PREFIX`          | Required prefix for mined transaction IDs (hex string, e.g., "97b1" or "0x97b1")| `97b1`                   |
+| `IGRA_LANE_ID`          | 4-byte SubnetworkId namespace as exactly 8 lowercase hex chars, no `0x` (e.g. `97b10000`). RPC zero-pads to the full 20-byte SubnetworkId per KIP-21. | required (from `config.toml`) |
 | `EL_WS_URL`             | WebSocket URL of the IGRA EL Client      | Derived from `EL_URL` (ws://, port 8546) |
-| `MINING_TIMEOUT_SECONDS`| Mining timeout in seconds (1-300)        | `10`                             |
+
+### Deployment
+
+`IGRA_LANE_ID` must match the connected kaswallet daemon's
+`KASWALLET_SUBNETWORK_ID`. Both take the same 4-byte namespace string
+(e.g. `97b10000`). On a mismatch the RPC validates the unsigned tx
+returned by the daemon, rejects it with `LaneValidationFailed` before
+signing, and the user sees an `eth_sendRawTransaction` failure with an
+explanatory error message — no tx is broadcast.
 
 Example: Run with a custom node URL.
 ```sh
@@ -237,7 +253,7 @@ docker run -p 8535:8535 \
   -e EL_URL="http://igra-el-client:8545" \
   -e WALLET_DAEMON_URI="http://kaswallet:8082" \
   -e WALLET_TO_ADDRESS="kaspa:qpam..." \
-  -e TX_ID_PREFIX="97b2" \
+  -e IGRA_LANE_ID="97b10000" \
   --network your-network \
   igra-rpc-provider
 ```
@@ -261,14 +277,14 @@ The `entry_transaction_sender` binary can also be run via Docker. Make sure to p
 export WALLET_TO_ADDRESS='kaspa:qpt9...'
 export WALLET_DAEMON_URI='http://kaswallet:8082'
 export KASWALLET_PASSWORD=''
-export TX_ID_PREFIX='97b2'
+export IGRA_LANE_ID='97b10000'
 
 # Run entry_transaction_sender - each -e flag passes the variable to the container
 docker run --rm \
   -e WALLET_TO_ADDRESS \
   -e WALLET_DAEMON_URI \
   -e KASWALLET_PASSWORD \
-  -e TX_ID_PREFIX \
+  -e IGRA_LANE_ID \
   --network your-network \
   --entrypoint /app/entry_transaction_sender \
   igranetwork/rpc-provider:latest \
@@ -277,7 +293,11 @@ docker run --rm \
   --l2-address 0xd850cc8fdd0348f12df47fd597784007c3c05f75
 ```
 
-**Common mistake**: If you set `TX_ID_PREFIX=97b2` in your shell but omit `-e TX_ID_PREFIX` from the docker command, the container will use the default value (`97b1`) instead of your configured value.
+**Common mistake**: If you set `IGRA_LANE_ID=97b10000` in your shell but
+omit `-e IGRA_LANE_ID` from the docker command, the container will fall
+back to the value in `config.toml` (or fail to start if neither is set).
+The configured value must match the connected kaswallet daemon's
+`KASWALLET_SUBNETWORK_ID`.
 
 ---
 

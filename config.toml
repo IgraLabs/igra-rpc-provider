@@ -17,11 +17,11 @@ read_only = false
 [gas]
 min_protocol_fee_per_gas_gwei = 100
 
-[mining]
-# Required prefix for mined transaction IDs (default: [0x97, 0xb1])
-tx_id_prefix = [0x97, 0xb1]
-# Mining timeout in seconds (valid range: 0-300, default: 10)
-timeout_seconds = 10
+[igra]
+# IGRA lane: 4-byte SubnetworkId namespace as 8 lowercase hex chars, no 0x.
+# Zero-padded internally to the full 20-byte SubnetworkId per KIP-21.
+# Must match the connected kaswallet daemon's KASWALLET_SUBNETWORK_ID.
+lane_id = "97b10000"
 
 [retry]
 # Maximum number of retry attempts for transient errors (default: 3)

@@ -6,7 +6,7 @@ use tracing::{debug, info};
 
 // Re-export domain-specific configurations
 pub use super::{
-    validate_all_configs, ConfigValidation, GasConfig, MiningConfig, ProxyConfig, RetryConfig,
+    validate_all_configs, ConfigValidation, GasConfig, IgraConfig, ProxyConfig, RetryConfig,
     SecurityConfig, ServerConfig, WalletConfig,
 };
 
@@ -22,8 +22,8 @@ pub struct AppConfig {
     pub wallet: WalletConfig,
     /// Security and whitelist configuration
     pub security: SecurityConfig,
-    /// Mining configuration
-    pub mining: MiningConfig,
+    /// IGRA lane configuration (post-Toccata)
+    pub igra: IgraConfig,
     /// Gas pricing configuration
     #[serde(default)]
     pub gas: GasConfig,
@@ -64,9 +64,8 @@ impl AppConfig {
             // Security configuration
             ("SECURITY_ENABLE_WHITELIST", "security.enable_whitelist"),
             ("READ_ONLY", "security.read_only"),
-            // Mining configuration
-            ("TX_ID_PREFIX", "mining.tx_id_prefix"),
-            ("MINING_TIMEOUT_SECONDS", "mining.timeout_seconds"),
+            // IGRA lane configuration (post-Toccata)
+            ("IGRA_LANE_ID", "igra.lane_id"),
             // Gas configuration
             (
                 "MIN_PROTOCOL_FEE_PER_GAS_GWEI",
@@ -98,7 +97,24 @@ impl AppConfig {
         // Validate all domain-specific configurations
         Self::validate_config(&config)?;
 
-        info!("Loaded config: {:?}", config);
+        // Structured per-field logging. Avoid `info!("{:?}", config)` so a
+        // future config field carrying a secret cannot silently leak into
+        // log aggregation simply by deriving `Debug`.
+        info!(
+            server_host = %config.server.host,
+            server_port = config.server.port,
+            proxy_el_url = %config.proxy.el_url(),
+            wallet_daemon_uri = %config.wallet.wallet_daemon_uri,
+            wallet_to_address = %config.wallet.to_address,
+            security_enable_whitelist = config.security.enable_whitelist,
+            security_read_only = config.security.read_only,
+            igra_lane_id = %hex::encode(config.igra.lane_id()),
+            gas_min_protocol_fee_per_gas_gwei = config.gas.min_protocol_fee_per_gas_gwei,
+            retry_max_attempts = config.retry.max_attempts,
+            retry_initial_delay_ms = config.retry.initial_delay_ms,
+            retry_max_delay_ms = config.retry.max_delay_ms,
+            "loaded application configuration"
+        );
         Ok(config)
     }
 
@@ -126,9 +142,9 @@ impl AppConfig {
             .map_err(|e| AppError::ConfigError(format!("Security config: {e}")))?;
 
         config
-            .mining
+            .igra
             .validate()
-            .map_err(|e| AppError::ConfigError(format!("Mining config: {e}")))?;
+            .map_err(|e| AppError::ConfigError(format!("Igra config: {e}")))?;
 
         config
             .gas

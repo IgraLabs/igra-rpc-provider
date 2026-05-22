@@ -69,7 +69,9 @@ pub struct IgraPayload {
     pub tx_type_id: TxTypeId,
     /// The L2-specific data.
     pub l2_data: Vec<u8>,
-    /// The nonce used for mining a valid transaction ID.
+    /// Reserved 4-byte slot. Pre-Toccata this carried a nonce mined for the
+    /// IGRA tx-id prefix; post-Toccata lane binding is on `Transaction.subnetwork_id`
+    /// so the slot is fixed at zero, kept on the wire for payload-format stability.
     pub nonce: [u8; NONCE_SIZE],
 }
 

@@ -29,12 +29,20 @@ hex = "0.4"
 humantime = "2.1"
 anyhow = "1.0"
 regex = "1"
-kaspa-addresses = { git = "https://github.com/IgraLabs/rusty-kaspa.git"}
-kaspa-bip32 = { git = "https://github.com/IgraLabs/rusty-kaspa.git"}
-kaspa-consensus-core = { git = "https://github.com/IgraLabs/rusty-kaspa.git"}
-kaspa-hashes = { git = "https://github.com/IgraLabs/rusty-kaspa.git"}
-kaspa-wallet-core = { git = "https://github.com/IgraLabs/rusty-kaspa.git"}
-proto = { git = "ssh://git@github.com/IgraLabs/kaswallet.git", package = "kaswallet-proto", branch = "main" }
+# kaspa-* and proto deps pinned by rev so fresh checkouts and CI runs
+# resolve to a fixed commit even if the upstream branch is force-pushed,
+# rebased, or deleted. Bump these revs deliberately by editing Cargo.toml.
+# Current revs:
+#   kaspanet/rusty-kaspa @ branch `toccata`             → f1d1a1ae
+#   IgraLabs/kaswallet   @ branch `ENG-1058/.../toccata` → 3bffd52f
+# Re-point both back to their merged target (rusty-kaspa master /
+# kaswallet main) once those branches land.
+kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "f1d1a1ae6a4131a3d6124fef443192323c1c382f" }
+kaspa-bip32 = { git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "f1d1a1ae6a4131a3d6124fef443192323c1c382f" }
+kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "f1d1a1ae6a4131a3d6124fef443192323c1c382f" }
+kaspa-hashes = { git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "f1d1a1ae6a4131a3d6124fef443192323c1c382f" }
+kaspa-wallet-core = { git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "f1d1a1ae6a4131a3d6124fef443192323c1c382f" }
+proto = { git = "ssh://git@github.com/IgraLabs/kaswallet.git", package = "kaswallet-proto", rev = "3bffd52f76838c128ad41674224360767d0b5d0c" }
 once_cell = "1.19"
 rand = "0.8"
 reqwest = { version = "0.12.12", features = ["json"] }
@@ -54,7 +62,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tonic = "0.12.3"
 uuid = { version = "1.8.0", features = ["v4"] }
 wasm-bindgen = "=0.2.100"
-js-sys = "=0.3.70"
+js-sys = "=0.3.77"
 
 [dev-dependencies]
 mockito = "1.2"

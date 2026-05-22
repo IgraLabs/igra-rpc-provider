@@ -103,7 +103,7 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-git = [
     "ssh://git@github.com/IgraLabs/kaswallet.git",
-    "https://github.com/IgraLabs/rusty-kaspa.git",
+    "https://github.com/kaspanet/rusty-kaspa.git",
 ]
 
 [sources.allow-org]

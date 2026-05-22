@@ -49,10 +49,6 @@ pub enum WalletError {
     #[error("Address generation failed: {0}")]
     AddressGenerationFailed(String),
 
-    /// Mining operation failed
-    #[error("Mining operation failed: {0}")]
-    MiningFailed(String),
-
     /// Transaction broadcast failed
     #[error("Transaction broadcast failed: {0}")]
     BroadcastFailed(String),
@@ -249,7 +245,6 @@ impl WalletError {
             WalletError::WalletLocked => "WALLET_LOCKED",
             WalletError::WalletNotFound { .. } => "WALLET_NOT_FOUND",
             WalletError::AddressGenerationFailed(_) => "ADDRESS_GENERATION_FAILED",
-            WalletError::MiningFailed(_) => "MINING_FAILED",
             WalletError::BroadcastFailed(_) => "BROADCAST_FAILED",
             WalletError::TransactionValidationFailed(_) => "TRANSACTION_VALIDATION_FAILED",
             WalletError::UtxoSelectionFailed(_) => "UTXO_SELECTION_FAILED",

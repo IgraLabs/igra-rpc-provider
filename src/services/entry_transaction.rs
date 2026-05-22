@@ -6,10 +6,7 @@
 use crate::{
     clients::wallet_caller::{TransactionParams, WalletCaller, WalletCallerError},
     config::AppConfig,
-    services::{
-        mining::TransactionMiner,
-        transaction::{serialize_payload, VERSION},
-    },
+    services::transaction::{serialize_payload, VERSION},
     types::rpc::{IgraPayload, TxTypeId},
 };
 use kaspa_addresses::Address;
@@ -105,7 +102,6 @@ impl L2Data {
 /// Service for processing Entry Transactions
 pub struct EntryTransactionService {
     wallet_caller: WalletCaller,
-    transaction_miner: TransactionMiner,
     retry_config: crate::config::RetryConfig,
 }
 
@@ -114,15 +110,13 @@ impl EntryTransactionService {
     pub async fn new() -> Result<Self, EntryTransactionError> {
         let config = AppConfig::load().map_err(|e| EntryTransactionError::Config(e.to_string()))?;
 
-        let wallet_caller = WalletCaller::new(config.wallet.clone()).await?;
-        let transaction_miner = TransactionMiner::new(config.mining.clone());
+        let wallet_caller = WalletCaller::new(config.wallet.clone(), config.igra.clone()).await?;
         let retry_config = config.retry.clone();
 
         info!("EntryTransactionService initialized successfully");
 
         Ok(Self {
             wallet_caller,
-            transaction_miner,
             retry_config,
         })
     }
@@ -147,14 +141,10 @@ impl EntryTransactionService {
             serialized,
         );
 
-        // Mine and send transaction with retry support
+        // Construct, validate (IGRA lane), sign, and broadcast.
         let result = self
             .wallet_caller
-            .mine_and_send_transaction_with_retry(
-                transaction_params,
-                &self.transaction_miner,
-                &self.retry_config,
-            )
+            .create_sign_and_broadcast_igra_lane_transaction(transaction_params, &self.retry_config)
             .await?;
 
         info!("Entry transaction processed successfully: {}", result);

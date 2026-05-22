@@ -5,7 +5,7 @@
 /// aspect of the application configuration.
 pub mod app;
 pub mod gas;
-pub mod mining;
+pub mod igra;
 pub mod proxy;
 pub mod retry;
 pub mod security;
@@ -17,7 +17,7 @@ pub use app::{AppConfig, ElConfig};
 
 // Re-export domain-specific configuration types for easier access
 pub use gas::GasConfig;
-pub use mining::MiningConfig;
+pub use igra::IgraConfig;
 pub use proxy::ProxyConfig;
 pub use retry::RetryConfig;
 pub use security::SecurityConfig;
@@ -37,7 +37,7 @@ impl ConfigValidation for GasConfig {
     }
 }
 
-impl ConfigValidation for MiningConfig {
+impl ConfigValidation for IgraConfig {
     fn validate(&self) -> Result<(), String> {
         self.validate().map_err(|e| e.to_string())
     }
@@ -92,6 +92,10 @@ pub fn validate_all_configs<T: ConfigValidation>(configs: &[T]) -> Result<(), Ve
 mod tests {
     use super::*;
 
+    fn test_igra_config() -> IgraConfig {
+        IgraConfig::from_namespace([0x97, 0xb1, 0x00, 0x00])
+    }
+
     #[test]
     fn test_config_validation_trait() {
         let gas_config = GasConfig::new();
@@ -109,8 +113,8 @@ mod tests {
         let proxy_config = ProxyConfig::with_el_url("http://localhost:8545".to_string());
         assert!(proxy_config.validate().is_ok());
 
-        let mining_config = MiningConfig::new();
-        assert!(mining_config.validate().is_ok());
+        let igra_config = test_igra_config();
+        assert!(ConfigValidation::validate(&igra_config).is_ok());
 
         let security_config = SecurityConfig::new();
         assert!(security_config.validate().is_ok());
@@ -143,7 +147,7 @@ mod tests {
     fn test_all_config_types_importable() {
         // Test that all config types can be created and used
         let _gas = GasConfig::new();
-        let _mining = MiningConfig::new();
+        let _igra = test_igra_config();
         let _proxy = ProxyConfig::new();
         let _security = SecurityConfig::new();
         let _server = ServerConfig::new();

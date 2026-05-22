@@ -4,7 +4,6 @@ use crate::error::AppError;
 use crate::errors::transaction::TransactionError;
 use crate::errors::ToJsonRpcError;
 use crate::services::gas_price::GasPriceService;
-use crate::services::mining::TransactionMiner;
 use crate::types::rpc::{IgraPayload, RpcRequest, TxTypeId};
 use crate::AppState;
 use alloy::consensus::TxEnvelope;
@@ -544,15 +543,22 @@ pub fn compute_transaction_hash(tx_bytes: &[u8]) -> B256 {
     keccak256(tx_bytes)
 }
 
-/// Processes a transaction through the wallet caller
+/// Processes a transaction through the wallet caller.
+///
+/// Builds the IGRA payload (optionally ZLIB-compressed), hands it to the
+/// kaswallet daemon for IGRA-lane construction, validates the lane,
+/// signs, and broadcasts.
 pub async fn process_wallet_call(
     tx_bytes: &[u8],
     config: &AppConfig,
     id: Value,
     app_state: Arc<AppState>,
 ) -> Result<Value, String> {
-    // For now, we'll use a mock nonce. In the future, this will be the result of mining.
-    let nonce = [0u8, 0u8, 0u8, 1u8];
+    // Post-Toccata: lane binding is on the consensus side via the
+    // configured subnetwork_id, not via a payload nonce. Keep the
+    // 4-byte nonce slot zeroed for wire-format stability with
+    // downstream payload parsers.
+    let nonce = [0u8; 4];
 
     // Conditionally compress — use zipped only if it actually saves space
     let (l2_data, tx_type_id) = match compress_zlib(tx_bytes) {
@@ -615,7 +621,6 @@ pub async fn process_wallet_call(
 
     let wallet_caller = app_state.wallet_caller.clone();
 
-    // Actually send the transaction
     info!(
         "WALLET_CALL [hash={}]: Sending transaction to wallet, payload_size={}",
         tx_hash_str,
@@ -626,19 +631,14 @@ pub async fn process_wallet_call(
     // Capture payload size before moving it
     let payload_size = wallet_payload_bytes.len();
 
-    let miner = TransactionMiner::new(config.mining.clone());
-    debug!("WALLET_CALL [hash={}]: Created transaction miner with config: tx_id_prefix=0x{}, timeout={}s",
-        tx_hash_str, hex::encode(&config.mining.tx_id_prefix), config.mining.timeout_seconds);
-
     let transaction_params = TransactionParams::send_all(
         wallet_caller.default_to_address().to_string(),
         wallet_payload_bytes,
         Some(tx_hash_str.clone()),
     );
 
-    // Use retry-enabled method with retry config
     if let Err(err) = wallet_caller
-        .mine_and_send_transaction_with_retry(transaction_params, &miner, &config.retry)
+        .create_sign_and_broadcast_igra_lane_transaction(transaction_params, &config.retry)
         .await
     {
         let error_msg = format!("KASPA Wallet call failed: {err}");

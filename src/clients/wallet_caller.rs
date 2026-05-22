@@ -1,7 +1,6 @@
-use crate::config::{RetryConfig, WalletConfig};
+use crate::config::{IgraConfig, RetryConfig, WalletConfig};
 use crate::error::AppError;
-use crate::services::mining::TransactionMiner;
-use crate::types::wallet::{proto_to_signable_transaction, update_proto_with_mined_transaction};
+use crate::types::wallet::{is_partially_signed, partial_proto_transaction};
 use proto::kaswallet_proto::wallet_client::WalletClient;
 use proto::kaswallet_proto::{
     BroadcastRequest, CreateUnsignedTransactionsRequest, NewAddressRequest, SignRequest,
@@ -15,6 +14,16 @@ use tracing::{debug, error, info, instrument, warn};
 
 const PASSWORD_ENV_VAR: &str = "KASWALLET_PASSWORD";
 const GRPC_TIMEOUT_SECS: u64 = 30;
+
+/// Upper bound on outputs per kaswallet-emitted IGRA-lane tx.
+///
+/// A correct IGRA submission produces at most two outputs: the recipient
+/// output (or the wallet's own change address in `send_all` mode) plus
+/// optionally one change output. We reject any tx with more outputs than
+/// this — a daemon emitting a wider output set is either buggy or trying
+/// to redirect funds, and we'd rather fail at the boundary than spend a
+/// signing round-trip on it.
+const MAX_OUTPUTS_PER_LANE_TX: usize = 2;
 
 /// Parameters for creating a transaction
 #[derive(Debug, Clone)]
@@ -59,10 +68,17 @@ pub struct WalletCaller {
     wallet_daemon_client: Mutex<WalletClient<tonic::transport::Channel>>,
     to_address: String,
     password: String,
+    /// Full 20-byte SubnetworkId of the configured IGRA lane. Used to
+    /// validate that the kaswallet daemon produced a tx in the expected
+    /// lane before we sign and broadcast it.
+    lane_id: [u8; 20],
 }
 
 impl WalletCaller {
-    pub async fn new(wallet_config: WalletConfig) -> Result<Self, WalletCallerError> {
+    pub async fn new(
+        wallet_config: WalletConfig,
+        igra_config: IgraConfig,
+    ) -> Result<Self, WalletCallerError> {
         let mut wallet_daemon_client =
             WalletClient::connect(wallet_config.wallet_daemon_uri.clone())
                 .await
@@ -89,95 +105,46 @@ impl WalletCaller {
             wallet_daemon_client: Mutex::new(wallet_daemon_client),
             to_address,
             password,
+            lane_id: igra_config.lane_id(),
         })
     }
 
-    /// Mine and send transaction using the focused mining service with retry support
-    #[instrument(skip(self, transaction_params, miner, retry_config))]
-    pub async fn mine_and_send_transaction_with_retry(
+    /// Construct, validate, sign, and broadcast an IGRA-lane transaction.
+    ///
+    /// 1. Ask kaswallet for an unsigned transaction (with UTXO-exhaustion
+    ///    retry).
+    /// 2. Validate the returned tx is on the configured IGRA lane, carries
+    ///    the expected payload, and uses v1 `ComputeBudget` input mass.
+    /// 3. Sign via the wallet daemon.
+    /// 4. Broadcast and return the last broadcast tx id.
+    ///
+    /// Validation runs **before** signing, so a misbehaving daemon never
+    /// gets a signature on a wrong-lane tx.
+    #[instrument(skip(self, transaction_params, retry_config))]
+    pub async fn create_sign_and_broadcast_igra_lane_transaction(
         &self,
         transaction_params: TransactionParams,
-        miner: &TransactionMiner,
         retry_config: &RetryConfig,
     ) -> Result<String, WalletCallerError> {
         let unsigned_transactions = self
-            .create_unsigned_transaction_with_retry(transaction_params.clone(), retry_config)
+            .create_unsigned_transaction_with_retry(&transaction_params, retry_config)
             .await?;
-
-        self.complete_transaction_flow(unsigned_transactions, transaction_params, miner)
-            .await
-    }
-
-    /// Mine and send transaction using the focused mining service (legacy without retry)
-    #[instrument(skip(self, transaction_params, miner))]
-    pub async fn mine_and_send_transaction(
-        &self,
-        transaction_params: TransactionParams,
-        miner: &TransactionMiner,
-    ) -> Result<String, WalletCallerError> {
-        let unsigned_transactions = self
-            .create_unsigned_transaction(transaction_params.clone())
-            .await?;
-
-        self.complete_transaction_flow(unsigned_transactions, transaction_params, miner)
-            .await
-    }
-
-    /// Complete the transaction flow after creating unsigned transactions
-    async fn complete_transaction_flow(
-        &self,
-        mut unsigned_transactions: Vec<WalletSignableTransaction>,
-        transaction_params: TransactionParams,
-        miner: &TransactionMiner,
-    ) -> Result<String, WalletCallerError> {
-        if unsigned_transactions.is_empty() {
-            return Err(WalletCallerError::NoTransactionIds);
-        }
 
         info!(
-            "Created {} unsigned transactions, starting mining process",
+            "Created {} unsigned transactions, validating IGRA lane before signing",
             unsigned_transactions.len()
         );
 
-        let last_index = unsigned_transactions.len().saturating_sub(1);
-        let last_transaction = &unsigned_transactions[last_index];
-
-        let signable_tx = proto_to_signable_transaction(last_transaction)
-            .map_err(|e| WalletCallerError::TransactionDecodingFailed(e.to_string()))?;
-
-        let original_tx_id = signable_tx.id();
+        self.validate_lane_transaction(&unsigned_transactions, &transaction_params.payload)
+            .map_err(WalletCallerError::LaneValidationFailed)?;
 
         info!(
-            "Extracted SignableTransaction {}, starting mining",
-            original_tx_id
-        );
-
-        let (mined_transaction, mining_stats) = miner
-            .mine_transaction(signable_tx)
-            .await
-            .map_err(WalletCallerError::MiningFailed)?;
-
-        info!(
-            "Mining completed: {} nonces in {:?}, hash rate: {:.2} H/s",
-            mining_stats.nonces_tried, mining_stats.duration, mining_stats.hashes_per_second,
-        );
-
-        info!(
-            "Mined transaction: igra_payload={} (to_address={}, amount={}, is_send_all={}, payload_size={} bytes)",
-            hex::encode(&mined_transaction.tx.payload),
-            &transaction_params.to_address,
+            "Lane validation passed (to_address={}, amount={}, is_send_all={}, payload_size={} bytes); proceeding to sign and broadcast",
+            transaction_params.to_address,
             transaction_params.amount,
             transaction_params.is_send_all,
             transaction_params.payload.len()
         );
-
-        update_proto_with_mined_transaction(
-            &mut unsigned_transactions[last_index],
-            mined_transaction,
-        )
-        .map_err(|e| WalletCallerError::TransactionEncodingFailed(e.to_string()))?;
-
-        info!("Mining completed successfully, proceeding with signing and broadcasting");
 
         let signed_transactions = self.sign_transactions(unsigned_transactions).await?;
         info!("Transactions signed successfully");
@@ -195,8 +162,176 @@ impl WalletCaller {
         Ok(last_tx_id.clone())
     }
 
+    /// Validate every tx kaswallet returned, before signing.
+    ///
+    /// For each tx: enforce v1 + configured IGRA `subnetwork_id` + zero
+    /// `lock_time` + zero `gas` + a bounded output count (recipient +
+    /// optional change) + non-empty inputs + per-input `ComputeBudget`
+    /// mass (`sig_op_count == 0`, `0 < compute_budget <= u16::MAX`). The
+    /// *last* tx must additionally carry our expected payload — pre-stage
+    /// UTXO consolidations carry no IGRA payload but still must be on the
+    /// configured lane (otherwise a daemon could exfiltrate signatures on
+    /// off-lane consolidations).
+    ///
+    /// **Trust boundary**: this is defence-in-depth against daemon bugs and
+    /// misconfiguration. It does NOT defend against a fully compromised
+    /// kaswallet daemon — the daemon holds wallet keys and can sign and
+    /// broadcast independently of RPC. In particular, output
+    /// `script_public_key` matching against the wallet's address pool is
+    /// not enforced here; we only bound output count to
+    /// [`MAX_OUTPUTS_PER_LANE_TX`] (recipient + change) per tx.
+    ///
+    /// Returns the validation-failure reason as a plain `String` so the
+    /// caller can wrap it in `WalletCallerError::LaneValidationFailed`
+    /// without forcing the larger error type onto a fallible sync return
+    /// path (avoids `clippy::result_large_err`).
+    fn validate_lane_transaction(
+        &self,
+        txs: &[WalletSignableTransaction],
+        expected_payload: &[u8],
+    ) -> Result<(), String> {
+        if txs.is_empty() {
+            return Err("kaswallet returned no unsigned transactions".to_string());
+        }
+
+        // saturating because the project lints deny direct arithmetic; we
+        // already guaranteed `txs.len() >= 1` above so the subtraction is
+        // exact.
+        let last_index = txs.len().saturating_sub(1);
+        for (i, tx) in txs.iter().enumerate() {
+            let label = if i == last_index {
+                "payload tx"
+            } else {
+                "pre-stage tx"
+            };
+            self.validate_single_lane_tx(i, tx, label)?;
+
+            if i == last_index {
+                let proto_tx = partial_proto_transaction(tx)
+                    .ok_or_else(|| format!("{label} #{i} is missing its proto Transaction body"))?;
+                if proto_tx.payload.as_ref() != expected_payload {
+                    let got_len = proto_tx.payload.len();
+                    let expected_len = expected_payload.len();
+                    return Err(if got_len == expected_len {
+                        format!("{label} #{i} payload: expected {expected_len} bytes, got {got_len} bytes (contents differ)")
+                    } else {
+                        format!("{label} #{i} payload: expected {expected_len} bytes, got {got_len} bytes")
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Structural lane-shape checks applied to every tx in the batch.
+    fn validate_single_lane_tx(
+        &self,
+        i: usize,
+        tx: &WalletSignableTransaction,
+        label: &str,
+    ) -> Result<(), String> {
+        if !is_partially_signed(tx) {
+            return Err(format!("{label} #{i} is not Partially signed"));
+        }
+
+        let proto_tx = partial_proto_transaction(tx)
+            .ok_or_else(|| format!("{label} #{i} is missing its proto Transaction body"))?;
+
+        if proto_tx.version != 1 {
+            return Err(format!(
+                "{label} #{i} version: expected 1 (Toccata v1), got {}",
+                proto_tx.version,
+            ));
+        }
+
+        if proto_tx.subnetwork_id.as_ref() != self.lane_id.as_slice() {
+            let got_bytes = proto_tx.subnetwork_id.len();
+            let got = if got_bytes == 0 {
+                "empty subnetwork_id".to_string()
+            } else if got_bytes != self.lane_id.len() {
+                format!(
+                    "{got_bytes}-byte subnetwork_id 0x{}",
+                    hex::encode(&proto_tx.subnetwork_id),
+                )
+            } else {
+                format!("0x{}", hex::encode(&proto_tx.subnetwork_id))
+            };
+            return Err(format!(
+                "{label} #{i} subnetwork_id: expected 0x{} (configured IGRA lane), got {got}",
+                hex::encode(self.lane_id),
+            ));
+        }
+
+        if proto_tx.lock_time != 0 {
+            return Err(format!(
+                "{label} #{i} lock_time: expected 0 on IGRA-lane tx, got {}",
+                proto_tx.lock_time,
+            ));
+        }
+
+        if proto_tx.gas != 0 {
+            return Err(format!(
+                "{label} #{i} gas: expected 0 on IGRA-lane tx \
+                 (gas lives in the L2 payload, not the L1 tx), got {}",
+                proto_tx.gas,
+            ));
+        }
+
+        if proto_tx.outputs.is_empty() {
+            return Err(format!(
+                "{label} #{i} outputs: expected at least 1, got 0 \
+                 (a valid send must produce at least the recipient output)"
+            ));
+        }
+
+        if proto_tx.outputs.len() > MAX_OUTPUTS_PER_LANE_TX {
+            return Err(format!(
+                "{label} #{i} outputs: expected at most {MAX_OUTPUTS_PER_LANE_TX} \
+                 (recipient + change), got {}",
+                proto_tx.outputs.len(),
+            ));
+        }
+
+        if proto_tx.inputs.is_empty() {
+            return Err(format!(
+                "{label} #{i} has no inputs (IGRA-lane tx must consume at least one UTXO)"
+            ));
+        }
+
+        // v1 input mass dispatch: kaswallet's wire contract
+        // (common/src/proto_convert.rs) populates `compute_budget` as
+        // authoritative and leaves `sig_op_count == 0`. We enforce that
+        // contract here plus a u16 upper bound matching the kaspa consensus
+        // mass type and a positive-value requirement (zero-mass v1 inputs
+        // are consensus-invalid).
+        for (j, input) in proto_tx.inputs.iter().enumerate() {
+            if input.sig_op_count != 0 {
+                return Err(format!(
+                    "{label} #{i} input #{j} sig_op_count: expected 0 on v1 tx \
+                     (use compute_budget mass), got {}",
+                    input.sig_op_count,
+                ));
+            }
+            if input.compute_budget == 0 {
+                return Err(format!(
+                    "{label} #{i} input #{j} compute_budget: expected > 0 on v1 tx \
+                     (IGRA lane requires positive per-input mass), got 0"
+                ));
+            }
+            if input.compute_budget > u32::from(u16::MAX) {
+                return Err(format!(
+                    "{label} #{i} input #{j} compute_budget: expected <= {} (u16::MAX, kaspa \
+                     consensus mass type) on v1 tx, got {}",
+                    u16::MAX,
+                    input.compute_budget,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Get the default to_address for this wallet caller
-    pub fn default_to_address(&self) -> &str {
+    pub(crate) fn default_to_address(&self) -> &str {
         &self.to_address
     }
 
@@ -333,7 +468,7 @@ impl WalletCaller {
     }
 
     /// Checks if a tonic::Status error indicates "No funds to send"
-    pub fn is_no_funds_error(status: &tonic::Status) -> bool {
+    fn is_no_funds_error(status: &tonic::Status) -> bool {
         // Check both error code and message for robustness
         // ResourceExhausted is the appropriate gRPC code for this type of error
         let is_resource_exhausted = matches!(status.code(), tonic::Code::ResourceExhausted);
@@ -347,7 +482,7 @@ impl WalletCaller {
         is_resource_exhausted || has_no_funds_message
     }
 
-    pub fn is_utxo_exhaustion_error(error: &WalletCallerError) -> bool {
+    fn is_utxo_exhaustion_error(error: &WalletCallerError) -> bool {
         match error {
             WalletCallerError::TransactionCreationFailed(status) => Self::is_no_funds_error(status),
             _ => false,
@@ -356,9 +491,9 @@ impl WalletCaller {
 
     /// Retry transaction creation with exponential backoff for UTXO exhaustion errors
     #[instrument(skip(self, transaction_params, retry_config))]
-    pub async fn create_unsigned_transaction_with_retry(
+    pub(crate) async fn create_unsigned_transaction_with_retry(
         &self,
-        transaction_params: TransactionParams,
+        transaction_params: &TransactionParams,
         retry_config: &RetryConfig,
     ) -> Result<Vec<WalletSignableTransaction>, WalletCallerError> {
         let mut last_error = None;
@@ -410,19 +545,21 @@ impl WalletCaller {
 
         // Convert the last error to RetryExhausted
         match last_error {
-            Some(WalletCallerError::TransactionCreationFailed(_)) => {
-                Err(WalletCallerError::MiningFailed(AppError::RetryExhausted {
+            Some(WalletCallerError::TransactionCreationFailed(_)) => Err(
+                WalletCallerError::WalletDaemonError(AppError::RetryExhausted {
                     attempts: retry_config.max_attempts,
                     reason: "UTXO exhaustion".to_string(),
-                }))
-            }
+                }),
+            ),
             Some(e) => Err(e),
             None => {
                 error!("Logic error: retry loop completed without capturing error");
-                Err(WalletCallerError::MiningFailed(AppError::RetryExhausted {
-                    attempts: retry_config.max_attempts,
-                    reason: "UTXO exhaustion (no error captured)".to_string(),
-                }))
+                Err(WalletCallerError::WalletDaemonError(
+                    AppError::RetryExhausted {
+                        attempts: retry_config.max_attempts,
+                        reason: "UTXO exhaustion (no error captured)".to_string(),
+                    },
+                ))
             }
         }
     }
@@ -452,20 +589,16 @@ pub enum WalletCallerError {
     #[error("Failed to broadcast transactions: {0}")]
     TransactionBroadcastFailed(#[source] tonic::Status),
 
-    #[error("Mining failed: {0}")]
-    MiningFailed(#[from] crate::error::AppError),
+    /// Carries application-level errors (e.g. retry exhaustion) surfaced
+    /// from below the gRPC layer.
+    #[error("Wallet daemon error: {0}")]
+    WalletDaemonError(#[from] crate::error::AppError),
+
+    #[error("IGRA lane validation failed: {0}")]
+    LaneValidationFailed(String),
 
     #[error("No transaction IDs returned from broadcast")]
     NoTransactionIds,
-
-    #[error("Failed to decode wallet transaction: {0}")]
-    TransactionDecodingFailed(String),
-
-    #[error("Failed to encode wallet transaction: {0}")]
-    TransactionEncodingFailed(String),
-
-    #[error("Failed to extract signable transaction: {0}")]
-    TransactionExtractionFailed(String),
 
     #[error("Wallet gRPC call '{operation}' timed out after {timeout_seconds}s")]
     GrpcTimeout {
@@ -503,18 +636,12 @@ impl From<WalletCallerError> for crate::error::AppError {
             WalletCallerError::TransactionBroadcastFailed(e) => {
                 crate::error::AppError::WalletError(format!("Transaction broadcast failed: {e}"))
             }
-            WalletCallerError::MiningFailed(e) => e,
+            WalletCallerError::WalletDaemonError(e) => e,
+            WalletCallerError::LaneValidationFailed(reason) => crate::error::AppError::WalletError(
+                format!("IGRA lane validation failed: {reason}"),
+            ),
             WalletCallerError::NoTransactionIds => {
                 crate::error::AppError::WalletError("No transaction IDs returned".to_string())
-            }
-            WalletCallerError::TransactionDecodingFailed(e) => {
-                crate::error::AppError::transaction_codec_error("decode", &e)
-            }
-            WalletCallerError::TransactionEncodingFailed(e) => {
-                crate::error::AppError::transaction_codec_error("encode", &e)
-            }
-            WalletCallerError::TransactionExtractionFailed(e) => {
-                crate::error::AppError::WalletError(format!("Transaction extraction failed: {e}"))
             }
             WalletCallerError::GrpcTimeout {
                 operation,
@@ -530,6 +657,445 @@ impl From<WalletCallerError> for crate::error::AppError {
 mod tests {
     use super::*;
     use crate::config::RetryConfig;
+    use proto::kaswallet_proto as proto_types;
+
+    /// Convenience: assemble a `[u8; 20]` lane id from its 4-byte
+    /// namespace, zero-padded per KIP-21.
+    fn lane(namespace: [u8; 4]) -> [u8; 20] {
+        let mut out = [0u8; 20];
+        out[..4].copy_from_slice(&namespace);
+        out
+    }
+
+    /// Construct a `WalletCaller` directly (without a live daemon) for
+    /// unit-testing pure functions like `validate_lane_transaction`.
+    fn caller_with_lane(lane_id: [u8; 20]) -> WalletCaller {
+        // We need to build a `WalletClient` value to satisfy the Mutex
+        // field, but we never make calls on it. `tonic::transport::Channel`
+        // can be constructed lazily without a live endpoint.
+        let endpoint = tonic::transport::Endpoint::from_static("http://127.0.0.1:1");
+        let channel = endpoint.connect_lazy();
+        WalletCaller {
+            wallet_daemon_client: Mutex::new(WalletClient::new(channel)),
+            to_address: "kaspa:test".to_string(),
+            password: "test".to_string(),
+            lane_id,
+        }
+    }
+
+    fn dummy_output() -> proto_types::TransactionOutput {
+        proto_types::TransactionOutput {
+            value: 1,
+            script_public_key: Some(proto_types::ScriptPublicKey {
+                version: 0,
+                script_public_key: "00".to_string(),
+            }),
+        }
+    }
+
+    fn make_proto_tx(
+        version: u32,
+        subnetwork_id: Vec<u8>,
+        payload: Vec<u8>,
+        inputs: Vec<proto_types::TransactionInput>,
+    ) -> proto_types::Transaction {
+        proto_types::Transaction {
+            version,
+            inputs,
+            outputs: vec![dummy_output()],
+            lock_time: 0,
+            subnetwork_id: subnetwork_id.into(),
+            gas: 0,
+            payload: payload.into(),
+            mass: 0,
+            id: vec![].into(),
+        }
+    }
+
+    fn wrap_signed(
+        tx: proto_types::Transaction,
+        variant: impl FnOnce(
+            proto_types::SignableTransaction,
+        ) -> proto_types::signed_transaction::Signed,
+    ) -> WalletSignableTransaction {
+        let signable = proto_types::SignableTransaction {
+            tx: Some(tx),
+            entries: vec![],
+            calculated_fee: None,
+            calculated_non_contextual_masses: None,
+        };
+        WalletSignableTransaction {
+            transaction: Some(proto_types::SignedTransaction {
+                signed: Some(variant(signable)),
+            }),
+            derivation_paths: vec![],
+            address_by_input_index: vec![],
+            address_by_output_index: vec![],
+        }
+    }
+
+    fn wrap_partial(tx: proto_types::Transaction) -> WalletSignableTransaction {
+        wrap_signed(tx, proto_types::signed_transaction::Signed::Partially)
+    }
+
+    fn wrap_fully(tx: proto_types::Transaction) -> WalletSignableTransaction {
+        wrap_signed(tx, proto_types::signed_transaction::Signed::Fully)
+    }
+
+    fn compute_budget_input(compute_budget: u32) -> proto_types::TransactionInput {
+        proto_types::TransactionInput {
+            previous_outpoint: Some(proto_types::TransactionOutpoint {
+                transaction_id: vec![0u8; 32].into(),
+                index: 0,
+            }),
+            signature_script: vec![].into(),
+            sequence: 0,
+            sig_op_count: 0,
+            compute_budget,
+        }
+    }
+
+    #[tokio::test]
+    async fn validate_accepts_v1_matching_lane_and_payload() {
+        let lane_id = lane([0x97, 0xb1, 0x00, 0x00]);
+        let caller = caller_with_lane(lane_id);
+        let payload = vec![1u8, 2, 3, 4, 5];
+        let tx = make_proto_tx(
+            1,
+            lane_id.to_vec(),
+            payload.clone(),
+            vec![compute_budget_input(42)],
+        );
+        let txs = vec![wrap_partial(tx)];
+        caller
+            .validate_lane_transaction(&txs, &payload)
+            .expect("v1 + matching lane + matching payload + compute_budget input must pass");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_native_lane_tx() {
+        let lane_id = lane([0x97, 0xb1, 0x00, 0x00]);
+        let caller = caller_with_lane(lane_id);
+        let payload = vec![1u8, 2, 3];
+        let native = [0u8; 20];
+        let tx = make_proto_tx(
+            1,
+            native.to_vec(),
+            payload.clone(),
+            vec![compute_budget_input(1)],
+        );
+        let txs = vec![wrap_partial(tx)];
+        let err = caller
+            .validate_lane_transaction(&txs, &payload)
+            .expect_err("native lane id must be rejected");
+        assert!(err.contains("subnetwork_id"), "msg was: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_wrong_non_native_lane_tx() {
+        let configured = lane([0x97, 0xb1, 0x00, 0x00]);
+        let other = lane([0x12, 0x34, 0x56, 0x78]);
+        let caller = caller_with_lane(configured);
+        let payload = vec![9u8];
+        let tx = make_proto_tx(
+            1,
+            other.to_vec(),
+            payload.clone(),
+            vec![compute_budget_input(1)],
+        );
+        let txs = vec![wrap_partial(tx)];
+        let err = caller
+            .validate_lane_transaction(&txs, &payload)
+            .expect_err("wrong lane id must be rejected");
+        assert!(err.contains("subnetwork_id"), "msg was: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_v0_transaction() {
+        let lane_id = lane([0x97, 0xb1, 0x00, 0x00]);
+        let caller = caller_with_lane(lane_id);
+        let payload = vec![0xAB];
+        let tx = make_proto_tx(0, lane_id.to_vec(), payload.clone(), vec![]);
+        let txs = vec![wrap_partial(tx)];
+        let err = caller
+            .validate_lane_transaction(&txs, &payload)
+            .expect_err("v0 transaction must be rejected");
+        assert!(err.contains("version"), "msg was: {err}");
+        assert!(err.contains("expected 1"), "msg was: {err}");
+        assert!(err.contains("got 0"), "msg was: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_payload_mismatch() {
+        let lane_id = lane([0x97, 0xb1, 0x00, 0x00]);
+        let caller = caller_with_lane(lane_id);
+        let expected = vec![1u8, 2, 3];
+        let mismatched = vec![9u8, 9, 9];
+        let tx = make_proto_tx(
+            1,
+            lane_id.to_vec(),
+            mismatched,
+            vec![compute_budget_input(1)],
+        );
+        let txs = vec![wrap_partial(tx)];
+        let err = caller
+            .validate_lane_transaction(&txs, &expected)
+            .expect_err("payload mismatch must be rejected");
+        assert!(err.contains("payload"), "msg was: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_v1_input_using_sig_op_count() {
+        let lane_id = lane([0x97, 0xb1, 0x00, 0x00]);
+        let caller = caller_with_lane(lane_id);
+        let payload = vec![1u8];
+        let legacy_input = proto_types::TransactionInput {
+            previous_outpoint: Some(proto_types::TransactionOutpoint {
+                transaction_id: vec![0u8; 32].into(),
+                index: 0,
+            }),
+            signature_script: vec![].into(),
+            sequence: 0,
+            sig_op_count: 1, // illegal on v1
+            compute_budget: 42,
+        };
+        let tx = make_proto_tx(1, lane_id.to_vec(), payload.clone(), vec![legacy_input]);
+        let txs = vec![wrap_partial(tx)];
+        let err = caller
+            .validate_lane_transaction(&txs, &payload)
+            .expect_err("v1 input with non-zero sig_op_count must be rejected");
+        assert!(err.contains("sig_op_count"), "msg was: {err}");
+        assert!(err.contains("expected 0"), "msg was: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_v1_input_with_zero_compute_budget() {
+        let lane_id = lane([0x97, 0xb1, 0x00, 0x00]);
+        let caller = caller_with_lane(lane_id);
+        let payload = vec![1u8];
+        let zero_mass_input = compute_budget_input(0);
+        let tx = make_proto_tx(1, lane_id.to_vec(), payload.clone(), vec![zero_mass_input]);
+        let txs = vec![wrap_partial(tx)];
+        let err = caller
+            .validate_lane_transaction(&txs, &payload)
+            .expect_err("v1 input with compute_budget == 0 must be rejected");
+        assert!(err.contains("compute_budget"), "msg was: {err}");
+        assert!(err.contains("expected > 0"), "msg was: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_v1_with_no_inputs() {
+        let lane_id = lane([0x97, 0xb1, 0x00, 0x00]);
+        let caller = caller_with_lane(lane_id);
+        let payload = vec![1u8];
+        let tx = make_proto_tx(1, lane_id.to_vec(), payload.clone(), vec![]);
+        let txs = vec![wrap_partial(tx)];
+        let err = caller
+            .validate_lane_transaction(&txs, &payload)
+            .expect_err("v1 tx with zero inputs must be rejected");
+        assert!(err.contains("no inputs"), "msg was: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_fully_signed_transaction() {
+        let lane_id = lane([0x97, 0xb1, 0x00, 0x00]);
+        let caller = caller_with_lane(lane_id);
+        let payload = vec![1u8];
+        let tx = make_proto_tx(
+            1,
+            lane_id.to_vec(),
+            payload.clone(),
+            vec![compute_budget_input(1)],
+        );
+        let txs = vec![wrap_fully(tx)];
+        let err = caller
+            .validate_lane_transaction(&txs, &payload)
+            .expect_err("fully signed transaction must be rejected at validation step");
+        assert!(err.contains("Partially"), "msg was: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_empty_tx_vector() {
+        let lane_id = lane([0x97, 0xb1, 0x00, 0x00]);
+        let caller = caller_with_lane(lane_id);
+        let err = caller
+            .validate_lane_transaction(&[], &[])
+            .expect_err("empty tx vector must be rejected");
+        assert!(err.contains("no unsigned transactions"), "msg was: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_v1_input_with_compute_budget_above_u16_max() {
+        let lane_id = lane([0x97, 0xb1, 0x00, 0x00]);
+        let caller = caller_with_lane(lane_id);
+        let payload = vec![1u8];
+        let oversized = u32::from(u16::MAX) + 1;
+        let tx = make_proto_tx(
+            1,
+            lane_id.to_vec(),
+            payload.clone(),
+            vec![compute_budget_input(oversized)],
+        );
+        let txs = vec![wrap_partial(tx)];
+        let err = caller
+            .validate_lane_transaction(&txs, &payload)
+            .expect_err("compute_budget above u16::MAX must be rejected");
+        assert!(err.contains("compute_budget"), "msg was: {err}");
+        assert!(err.contains("u16::MAX"), "msg was: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_non_zero_lock_time() {
+        let lane_id = lane([0x97, 0xb1, 0x00, 0x00]);
+        let caller = caller_with_lane(lane_id);
+        let payload = vec![1u8];
+        let mut tx = make_proto_tx(
+            1,
+            lane_id.to_vec(),
+            payload.clone(),
+            vec![compute_budget_input(1)],
+        );
+        tx.lock_time = 42;
+        let txs = vec![wrap_partial(tx)];
+        let err = caller
+            .validate_lane_transaction(&txs, &payload)
+            .expect_err("non-zero lock_time must be rejected on IGRA-lane tx");
+        assert!(err.contains("lock_time"), "msg was: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_non_zero_gas() {
+        let lane_id = lane([0x97, 0xb1, 0x00, 0x00]);
+        let caller = caller_with_lane(lane_id);
+        let payload = vec![1u8];
+        let mut tx = make_proto_tx(
+            1,
+            lane_id.to_vec(),
+            payload.clone(),
+            vec![compute_budget_input(1)],
+        );
+        tx.gas = 7;
+        let txs = vec![wrap_partial(tx)];
+        let err = caller
+            .validate_lane_transaction(&txs, &payload)
+            .expect_err("non-zero gas must be rejected on IGRA-lane tx");
+        assert!(err.contains("gas"), "msg was: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_empty_outputs() {
+        let lane_id = lane([0x97, 0xb1, 0x00, 0x00]);
+        let caller = caller_with_lane(lane_id);
+        let payload = vec![1u8];
+        let mut tx = make_proto_tx(
+            1,
+            lane_id.to_vec(),
+            payload.clone(),
+            vec![compute_budget_input(1)],
+        );
+        tx.outputs.clear();
+        let txs = vec![wrap_partial(tx)];
+        let err = caller
+            .validate_lane_transaction(&txs, &payload)
+            .expect_err("zero outputs must be rejected");
+        assert!(err.contains("outputs"), "msg was: {err}");
+        assert!(err.contains("at least 1"), "msg was: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_too_many_outputs() {
+        let lane_id = lane([0x97, 0xb1, 0x00, 0x00]);
+        let caller = caller_with_lane(lane_id);
+        let payload = vec![1u8];
+        let mut tx = make_proto_tx(
+            1,
+            lane_id.to_vec(),
+            payload.clone(),
+            vec![compute_budget_input(1)],
+        );
+        tx.outputs = vec![dummy_output(), dummy_output(), dummy_output()];
+        let txs = vec![wrap_partial(tx)];
+        let err = caller
+            .validate_lane_transaction(&txs, &payload)
+            .expect_err("more than MAX_OUTPUTS_PER_LANE_TX outputs must be rejected");
+        assert!(err.contains("outputs"), "msg was: {err}");
+        assert!(err.contains("at most"), "msg was: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_empty_subnetwork_id() {
+        let lane_id = lane([0x97, 0xb1, 0x00, 0x00]);
+        let caller = caller_with_lane(lane_id);
+        let payload = vec![1u8];
+        let tx = make_proto_tx(1, vec![], payload.clone(), vec![compute_budget_input(1)]);
+        let txs = vec![wrap_partial(tx)];
+        let err = caller
+            .validate_lane_transaction(&txs, &payload)
+            .expect_err("empty subnetwork_id must be rejected with explicit naming");
+        assert!(err.contains("empty subnetwork_id"), "msg was: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_short_subnetwork_id() {
+        let lane_id = lane([0x97, 0xb1, 0x00, 0x00]);
+        let caller = caller_with_lane(lane_id);
+        let payload = vec![1u8];
+        let tx = make_proto_tx(
+            1,
+            vec![0x97, 0xb1],
+            payload.clone(),
+            vec![compute_budget_input(1)],
+        );
+        let txs = vec![wrap_partial(tx)];
+        let err = caller
+            .validate_lane_transaction(&txs, &payload)
+            .expect_err("short subnetwork_id must be rejected");
+        assert!(err.contains("2-byte"), "msg was: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_walks_every_tx_and_rejects_off_lane_pre_stage() {
+        let lane_id = lane([0x97, 0xb1, 0x00, 0x00]);
+        let other = lane([0x12, 0x34, 0x00, 0x00]);
+        let caller = caller_with_lane(lane_id);
+        let payload = vec![1u8];
+        let prestage = make_proto_tx(1, other.to_vec(), vec![], vec![compute_budget_input(1)]);
+        let payload_tx = make_proto_tx(
+            1,
+            lane_id.to_vec(),
+            payload.clone(),
+            vec![compute_budget_input(1)],
+        );
+        let txs = vec![wrap_partial(prestage), wrap_partial(payload_tx)];
+        let err = caller
+            .validate_lane_transaction(&txs, &payload)
+            .expect_err("pre-stage tx on a different lane must be rejected");
+        assert!(err.contains("pre-stage tx #0"), "msg was: {err}");
+        assert!(err.contains("subnetwork_id"), "msg was: {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_accepts_multi_tx_when_all_on_lane_and_last_carries_payload() {
+        let lane_id = lane([0x97, 0xb1, 0x00, 0x00]);
+        let caller = caller_with_lane(lane_id);
+        let payload = vec![1u8, 2, 3];
+        let prestage = make_proto_tx(
+            1,
+            lane_id.to_vec(),
+            vec![], // pre-stage tx carries no IGRA payload
+            vec![compute_budget_input(1)],
+        );
+        let payload_tx = make_proto_tx(
+            1,
+            lane_id.to_vec(),
+            payload.clone(),
+            vec![compute_budget_input(1)],
+        );
+        let txs = vec![wrap_partial(prestage), wrap_partial(payload_tx)];
+        caller
+            .validate_lane_transaction(&txs, &payload)
+            .expect("multi-tx batch with all txs on lane and payload on the last must pass");
+    }
 
     #[test]
     fn test_is_no_funds_error() {
@@ -623,6 +1189,22 @@ mod tests {
                 assert!(msg.contains("Transaction creation failed"));
             }
             _ => panic!("Expected WalletError"),
+        }
+    }
+
+    #[test]
+    fn test_lane_validation_failed_to_app_error_conversion() {
+        let wallet_error = WalletCallerError::LaneValidationFailed("test reason".to_string());
+        let app_error: AppError = wallet_error.into();
+        match app_error {
+            AppError::WalletError(msg) => {
+                assert!(
+                    msg.contains("IGRA lane validation failed"),
+                    "msg was: {msg}"
+                );
+                assert!(msg.contains("test reason"), "msg was: {msg}");
+            }
+            _ => panic!("expected WalletError"),
         }
     }
 }
