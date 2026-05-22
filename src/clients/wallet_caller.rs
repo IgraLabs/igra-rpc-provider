@@ -167,11 +167,14 @@ impl WalletCaller {
     /// For each tx: enforce v1 + configured IGRA `subnetwork_id` + zero
     /// `lock_time` + zero `gas` + a bounded output count (recipient +
     /// optional change) + non-empty inputs + per-input `ComputeBudget`
-    /// mass (`sig_op_count == 0`, `0 < compute_budget <= u16::MAX`). The
-    /// *last* tx must additionally carry our expected payload — pre-stage
-    /// UTXO consolidations carry no IGRA payload but still must be on the
-    /// configured lane (otherwise a daemon could exfiltrate signatures on
-    /// off-lane consolidations).
+    /// mass (`sig_op_count == 0`, `0 < compute_budget <= u16::MAX`).
+    /// Payload check is shape-equality against a per-tx constraint:
+    /// the *last* tx must equal the caller's `expected_payload`; every
+    /// earlier (pre-stage UTXO consolidation) tx must carry an empty
+    /// payload — otherwise a daemon could smuggle an IGRA payload onto
+    /// a non-last tx and get it signed. Pre-stage txs are also held to
+    /// the same lane/version/mass constraints so a daemon cannot
+    /// exfiltrate signatures on off-lane consolidations.
     ///
     /// **Trust boundary**: this is defence-in-depth against daemon bugs and
     /// misconfiguration. It does NOT defend against a fully compromised
@@ -199,36 +202,34 @@ impl WalletCaller {
         // exact.
         let last_index = txs.len().saturating_sub(1);
         for (i, tx) in txs.iter().enumerate() {
-            let label = if i == last_index {
+            let is_payload_tx = i == last_index;
+            let label = if is_payload_tx {
                 "payload tx"
             } else {
                 "pre-stage tx"
             };
-            self.validate_single_lane_tx(i, tx, label)?;
-
-            if i == last_index {
-                let proto_tx = partial_proto_transaction(tx)
-                    .ok_or_else(|| format!("{label} #{i} is missing its proto Transaction body"))?;
-                if proto_tx.payload.as_ref() != expected_payload {
-                    let got_len = proto_tx.payload.len();
-                    let expected_len = expected_payload.len();
-                    return Err(if got_len == expected_len {
-                        format!("{label} #{i} payload: expected {expected_len} bytes, got {got_len} bytes (contents differ)")
-                    } else {
-                        format!("{label} #{i} payload: expected {expected_len} bytes, got {got_len} bytes")
-                    });
-                }
-            }
+            // The last tx must equal `expected_payload`; every earlier
+            // (pre-stage UTXO consolidation) tx must carry an empty
+            // payload — otherwise a daemon could smuggle a non-last
+            // IGRA-payload-carrying tx past the validator and get it
+            // signed.
+            let payload_constraint: &[u8] = if is_payload_tx { expected_payload } else { &[] };
+            self.validate_single_lane_tx(i, tx, label, payload_constraint)?;
         }
         Ok(())
     }
 
     /// Structural lane-shape checks applied to every tx in the batch.
+    ///
+    /// `payload_constraint` is the exact byte string the tx's payload
+    /// must equal. Callers pass `&[]` for pre-stage txs and the real
+    /// IGRA payload for the payload-carrying tx.
     fn validate_single_lane_tx(
         &self,
         i: usize,
         tx: &WalletSignableTransaction,
         label: &str,
+        payload_constraint: &[u8],
     ) -> Result<(), String> {
         if !is_partially_signed(tx) {
             return Err(format!("{label} #{i} is not Partially signed"));
@@ -296,6 +297,26 @@ impl WalletCaller {
             return Err(format!(
                 "{label} #{i} has no inputs (IGRA-lane tx must consume at least one UTXO)"
             ));
+        }
+
+        if proto_tx.payload.as_ref() != payload_constraint {
+            let got_len = proto_tx.payload.len();
+            let expected_len = payload_constraint.len();
+            // Distinguish three cases so an on-call can tell at a glance
+            // whether kaswallet smuggled a payload onto a pre-stage tx,
+            // returned the wrong-sized payload on the carrier, or
+            // returned the right-sized but different-content payload.
+            return Err(if expected_len == 0 {
+                format!(
+                    "{label} #{i} payload: expected empty (pre-stage txs must not carry an IGRA payload), got {got_len} bytes"
+                )
+            } else if got_len == expected_len {
+                format!(
+                    "{label} #{i} payload: expected {expected_len} bytes, got {got_len} bytes (contents differ)"
+                )
+            } else {
+                format!("{label} #{i} payload: expected {expected_len} bytes, got {got_len} bytes")
+            });
         }
 
         // v1 input mass dispatch: kaswallet's wire contract
@@ -1095,6 +1116,32 @@ mod tests {
         caller
             .validate_lane_transaction(&txs, &payload)
             .expect("multi-tx batch with all txs on lane and payload on the last must pass");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_non_last_tx_carrying_a_payload() {
+        // Defence against a daemon that smuggles an IGRA payload onto a
+        // pre-stage tx and a benign empty payload onto the last tx — the
+        // pre-stage tx would otherwise be signed and broadcast since
+        // earlier code only payload-checked the last tx.
+        let lane_id = lane([0x97, 0xb1, 0x00, 0x00]);
+        let caller = caller_with_lane(lane_id);
+        let real_payload = vec![1u8, 2, 3];
+        let smuggled = vec![0xCAu8, 0xFE];
+        let prestage = make_proto_tx(1, lane_id.to_vec(), smuggled, vec![compute_budget_input(1)]);
+        let payload_tx = make_proto_tx(
+            1,
+            lane_id.to_vec(),
+            real_payload.clone(),
+            vec![compute_budget_input(1)],
+        );
+        let txs = vec![wrap_partial(prestage), wrap_partial(payload_tx)];
+        let err = caller
+            .validate_lane_transaction(&txs, &real_payload)
+            .expect_err("pre-stage tx with a non-empty payload must be rejected");
+        assert!(err.contains("pre-stage tx #0"), "msg was: {err}");
+        assert!(err.contains("payload"), "msg was: {err}");
+        assert!(err.contains("expected empty"), "msg was: {err}");
     }
 
     #[test]

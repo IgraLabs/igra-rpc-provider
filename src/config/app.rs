@@ -115,6 +115,27 @@ impl AppConfig {
             retry_max_delay_ms = config.retry.max_delay_ms,
             "loaded application configuration"
         );
+
+        // Dedicated alignment banner: RPC has no startup probe yet for
+        // the kaswallet daemon's configured lane (kaswallet exposes no
+        // GetSubnetworkId RPC today — see PRD follow-up), so a mismatch
+        // is only caught on the first transaction via LaneValidationFailed.
+        // Emit a one-shot banner that surfaces the configured 4-byte
+        // namespace prominently so operators can grep both sides' logs
+        // and verify alignment before they ever submit a tx. The
+        // kaswallet daemon logs the same 4-byte namespace at startup
+        // (per its `--subnetwork-id` flag).
+        let lane = config.igra.lane_id();
+        info!(
+            target: "igra::deployment",
+            igra_lane_namespace_4b = %hex::encode(&lane[..4]),
+            igra_lane_id_20b = %hex::encode(lane),
+            "IGRA lane configured — verify the connected kaswallet daemon was started with \
+             matching KASWALLET_SUBNETWORK_ID (4-byte namespace shown above); a mismatch \
+             will be rejected on the first transaction with LaneValidationFailed and no tx \
+             will be broadcast"
+        );
+
         Ok(config)
     }
 

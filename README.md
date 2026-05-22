@@ -200,6 +200,37 @@ returned by the daemon, rejects it with `LaneValidationFailed` before
 signing, and the user sees an `eth_sendRawTransaction` failure with an
 explanatory error message — no tx is broadcast.
 
+#### Lane alignment check
+
+RPC has no startup probe for the daemon's configured lane yet (kaswallet
+exposes no `GetSubnetworkId` RPC at the time of writing — see the PRD's
+follow-ups for the planned RPC addition), so a lane mismatch is only
+caught on the first transaction. To verify alignment *before* the first
+submission, grep both processes' startup logs and compare the
+namespaces:
+
+```sh
+# RPC side — look for the dedicated banner emitted at startup.
+journalctl -u igra-rpc-provider --since=-5m \
+  | grep 'igra_lane_namespace_4b' | tail -1
+
+# kaswallet side — the daemon logs its active subnetwork at startup.
+journalctl -u kaswallet --since=-5m \
+  | grep 'subnetwork_id' | tail -1
+```
+
+The two 4-byte namespaces must match exactly. The RPC banner reads:
+
+```
+IGRA lane configured — verify the connected kaswallet daemon was
+started with matching KASWALLET_SUBNETWORK_ID …
+igra_lane_namespace_4b=97b10000  igra_lane_id_20b=97b1000000000000000000000000000000000000
+```
+
+In containerised deployments where startup logs roll fast, set both
+variables from a single shared env file (or the same Kubernetes
+ConfigMap key) so they cannot drift.
+
 Example: Run with a custom node URL.
 ```sh
 EL_URL="http://igra-el-client:8545" cargo run
