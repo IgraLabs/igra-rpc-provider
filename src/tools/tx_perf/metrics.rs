@@ -223,7 +223,7 @@ impl SlidingWindowMetrics {
         }
         let mut top_errors: Vec<(String, usize)> =
             freq.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-        top_errors.sort_by(|a, b| b.1.cmp(&a.1));
+        top_errors.sort_by_key(|entry| std::cmp::Reverse(entry.1));
         if top_errors.len() > 5 {
             top_errors.truncate(5);
         }
@@ -234,7 +234,7 @@ impl SlidingWindowMetrics {
             .iter()
             .map(|s| (s.id.clone(), s.hash.clone(), s.latency_micros))
             .collect();
-        slowest.sort_by(|a, b| b.2.cmp(&a.2));
+        slowest.sort_by_key(|entry| std::cmp::Reverse(entry.2));
         if slowest.len() > top_slowest {
             slowest.truncate(top_slowest);
         }
