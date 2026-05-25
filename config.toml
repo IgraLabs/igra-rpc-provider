@@ -23,6 +23,20 @@ tx_id_prefix = [0x97, 0xb1]
 # Mining timeout in seconds (valid range: 0-300, default: 10)
 timeout_seconds = 10
 
+[lane]
+# KIP-21 IGRA lane id as the 4-byte user-lane namespace (8 lowercase hex
+# chars, no 0x prefix, e.g. "97b10000"). REQUIRED FOR PRODUCTION — startup
+# fails unless either lane_id is set OR enforcement_disabled = true.
+# The wallet daemon must be configured with a matching
+# KASWALLET_SUBNETWORK_ID; the pre-mining validator catches a mismatch on
+# the first request.
+# lane_id = "97b10000"
+
+# Dev/test escape hatch — set to true ONLY when running against a
+# pre-Toccata network or for local tests without a wallet daemon. Logs a
+# loud warning at startup. Do not enable in production.
+# enforcement_disabled = false
+
 [retry]
 # Maximum number of retry attempts for transient errors (default: 3)
 max_attempts = 10

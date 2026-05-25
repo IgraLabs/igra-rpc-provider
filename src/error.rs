@@ -82,6 +82,12 @@ pub enum AppError {
     /// Error indicates that a write operation was attempted in read-only mode.
     #[error("Read-only mode is enabled")]
     ReadOnlyMode,
+
+    /// Error indicates that a transaction failed KIP-21 lane enforcement
+    /// (wrong subnetwork, pre-Toccata version, empty payload, or final tx
+    /// id does not match the configured TX_ID_PREFIX).
+    #[error("KIP-21 lane enforcement failed: {0}")]
+    LaneEnforcementFailed(String),
 }
 
 // Add conversion from WalletError to AppError
@@ -155,6 +161,9 @@ impl AppError {
                 format!("Retry exhausted after {attempts} attempts: {reason}"),
             ),
             AppError::ReadOnlyMode => (-32000, "Read-only mode is enabled".to_string()),
+            AppError::LaneEnforcementFailed(reason) => {
+                (-32016, format!("KIP-21 lane enforcement failed: {reason}"))
+            }
         };
 
         json!({

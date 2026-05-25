@@ -5,6 +5,7 @@
 /// aspect of the application configuration.
 pub mod app;
 pub mod gas;
+pub mod lane;
 pub mod mining;
 pub mod proxy;
 pub mod retry;
@@ -17,6 +18,7 @@ pub use app::{AppConfig, ElConfig};
 
 // Re-export domain-specific configuration types for easier access
 pub use gas::GasConfig;
+pub use lane::LaneConfig;
 pub use mining::MiningConfig;
 pub use proxy::ProxyConfig;
 pub use retry::RetryConfig;
@@ -40,6 +42,12 @@ impl ConfigValidation for GasConfig {
 impl ConfigValidation for MiningConfig {
     fn validate(&self) -> Result<(), String> {
         self.validate().map_err(|e| e.to_string())
+    }
+}
+
+impl ConfigValidation for LaneConfig {
+    fn validate(&self) -> Result<(), String> {
+        self.validate()
     }
 }
 

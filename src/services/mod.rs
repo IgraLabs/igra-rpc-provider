@@ -1,5 +1,6 @@
 pub mod entry_transaction;
 pub mod gas_price;
+pub mod lane;
 pub mod mining;
 pub mod proxy;
 pub mod transaction;

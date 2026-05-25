@@ -63,6 +63,7 @@ graph TB
         P --> T[Proxy Config]
         P --> U[Security Config]
         P --> V[Mining Config]
+        P --> W[Lane Config]
     end
 ```
 
@@ -127,6 +128,7 @@ graph TB
         AppConfig --> ProxyConfig
         AppConfig --> SecurityConfig
         AppConfig --> MiningConfig
+        AppConfig --> LaneConfig
     end
     
     subgraph "External Dependencies"
@@ -180,13 +182,15 @@ graph TB
     AppConfig --> ProxyConfig[Proxy Config]
     AppConfig --> SecurityConfig[Security Config]
     AppConfig --> MiningConfig[Mining Config]
-    
+    AppConfig --> LaneConfig[Lane Config]
+
     ServerConfig --> ServerValidation[Host/Port Validation]
     GasConfig --> GasValidation[Gas Price Validation]
     WalletConfig --> WalletValidation[URI Validation]
     ProxyConfig --> ProxyValidation[Timeout/Retry Validation]
     SecurityConfig --> SecurityValidation[Whitelist/Read-Only Validation]
     MiningConfig --> MiningValidation[Difficulty Validation]
+    LaneConfig --> LaneValidation[KIP-21 Namespace Validation]
 ```
 
 ### 4. Error Handling (`src/errors/`)
