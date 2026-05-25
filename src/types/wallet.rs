@@ -1,7 +1,7 @@
 use kaspa_consensus_core::subnets::SubnetworkId;
 use kaspa_consensus_core::tx::{
     MutableTransaction, ScriptPublicKey, Transaction, TransactionId, TransactionInput,
-    TransactionOutpoint, TransactionOutput, UtxoEntry,
+    TransactionOutpoint, TransactionOutput, TxInputMass, UtxoEntry,
 };
 use proto::kaswallet_proto as proto_types;
 use thiserror::Error;
@@ -70,11 +70,15 @@ fn proto_signable_to_kaspa(
             } else {
                 ScriptPublicKey::default()
             };
+            // covenant_id is a Toccata addition; the wallet daemon's proto
+            // does not carry it, so we always pass None on decode. The
+            // round-trip is asymmetric by construction.
             Ok(UtxoEntry::new(
                 entry.amount,
                 spk,
                 entry.block_daa_score,
                 entry.is_coinbase,
+                None,
             ))
         })
         .collect();
@@ -97,6 +101,15 @@ fn proto_signable_to_kaspa(
 fn proto_transaction_to_kaspa(
     proto_tx: &proto_types::Transaction,
 ) -> Result<Transaction, KaspaWalletError> {
+    // Parse the version first so input construction can pick the right
+    // mass-commitment field (v0 → sig_op_count, v1/Toccata → compute_budget).
+    // The two are not interchangeable; emitting the wrong shape causes the
+    // daemon (and consensus) to reject the tx.
+    let version = proto_tx.version.try_into().map_err(|_| {
+        KaspaWalletError::InternalServerError("Invalid transaction version".to_string())
+    })?;
+    let expects_compute_budget = TxInputMass::version_expects_compute_budget_field(version);
+
     let inputs: Result<Vec<TransactionInput>, KaspaWalletError> = proto_tx
         .inputs
         .iter()
@@ -108,15 +121,33 @@ fn proto_transaction_to_kaspa(
                     TransactionOutpoint::new(tx_id, op.index)
                 },
             );
-            let sig_op_count = input.sig_op_count.try_into().map_err(|_| {
-                KaspaWalletError::InternalServerError("Invalid sig_op_count".to_string())
-            })?;
-            Ok(TransactionInput::new(
-                outpoint,
-                input.signature_script.to_vec(),
-                input.sequence,
-                sig_op_count,
-            ))
+            if expects_compute_budget {
+                let compute_budget = u16::try_from(input.compute_budget).map_err(|_| {
+                    KaspaWalletError::InternalServerError(format!(
+                        "TransactionInput.compute_budget {} exceeds u16 max",
+                        input.compute_budget,
+                    ))
+                })?;
+                Ok(TransactionInput::new_with_compute_budget(
+                    outpoint,
+                    input.signature_script.to_vec(),
+                    input.sequence,
+                    compute_budget,
+                ))
+            } else {
+                let sig_op_count = u8::try_from(input.sig_op_count).map_err(|_| {
+                    KaspaWalletError::InternalServerError(format!(
+                        "TransactionInput.sig_op_count {} exceeds u8 max",
+                        input.sig_op_count,
+                    ))
+                })?;
+                Ok(TransactionInput::new(
+                    outpoint,
+                    input.signature_script.to_vec(),
+                    input.sequence,
+                    sig_op_count,
+                ))
+            }
         })
         .collect();
     let inputs = inputs?;
@@ -156,10 +187,6 @@ fn proto_transaction_to_kaspa(
         }
     };
 
-    let version = proto_tx.version.try_into().map_err(|_| {
-        KaspaWalletError::InternalServerError("Invalid transaction version".to_string())
-    })?;
-
     Ok(Transaction::new(
         version,
         inputs,
@@ -177,21 +204,42 @@ fn kaspa_signable_to_proto(
 ) -> Result<proto_types::SignableTransaction, KaspaWalletError> {
     let proto_tx = kaspa_transaction_to_proto(&kaspa_st.tx)?;
 
-    let entries: Vec<proto_types::OptionalUtxoEntry> = kaspa_st
+    // The proto carries no `covenant_id` field. If a future kaspa upgrade
+    // populates it on inputs, silently dropping it on the round-trip would
+    // sign and broadcast a tx that diverges from what the wallet expects.
+    // Fail closed in all build configurations (debug and release) so the
+    // first divergence surfaces as a request error, not a mempool reject.
+    let entries: Result<Vec<proto_types::OptionalUtxoEntry>, KaspaWalletError> = kaspa_st
         .entries
         .iter()
-        .map(|opt_entry| proto_types::OptionalUtxoEntry {
-            entry: opt_entry.as_ref().map(|entry| proto_types::UtxoEntry {
-                amount: entry.amount,
-                script_public_key: Some(proto_types::ScriptPublicKey {
-                    version: entry.script_public_key.version().into(),
-                    script_public_key: hex::encode(entry.script_public_key.script()),
+        .map(|opt_entry| {
+            let entry = match opt_entry.as_ref() {
+                Some(e) => e,
+                None => {
+                    return Ok(proto_types::OptionalUtxoEntry { entry: None });
+                }
+            };
+            if entry.covenant_id.is_some() {
+                return Err(KaspaWalletError::InternalServerError(
+                    "UtxoEntry.covenant_id is set but the kaswallet proto cannot \
+                     carry it; round-trip would silently drop the field"
+                        .to_string(),
+                ));
+            }
+            Ok(proto_types::OptionalUtxoEntry {
+                entry: Some(proto_types::UtxoEntry {
+                    amount: entry.amount,
+                    script_public_key: Some(proto_types::ScriptPublicKey {
+                        version: entry.script_public_key.version().into(),
+                        script_public_key: hex::encode(entry.script_public_key.script()),
+                    }),
+                    block_daa_score: entry.block_daa_score,
+                    is_coinbase: entry.is_coinbase,
                 }),
-                block_daa_score: entry.block_daa_score,
-                is_coinbase: entry.is_coinbase,
-            }),
+            })
         })
         .collect();
+    let entries = entries?;
 
     Ok(proto_types::SignableTransaction {
         tx: Some(proto_tx),
@@ -222,7 +270,13 @@ fn kaspa_transaction_to_proto(
             }),
             signature_script: input.signature_script.clone().into(),
             sequence: input.sequence,
-            sig_op_count: input.sig_op_count.into(),
+            // Toccata: the parent tx's `version` field is authoritative on
+            // the wire — v0 reads `sig_op_count`, v1 reads `compute_budget`,
+            // and the "other" field is always present but ignored by the
+            // consensus model on receive. Always populate both (zeroing the
+            // inapplicable one) so the round-trip matches kaswallet.
+            sig_op_count: u32::from(input.mass.sig_op_count().unwrap_or(0)),
+            compute_budget: u32::from(input.mass.compute_budget().unwrap_or(0)),
         })
         .collect();
 
@@ -270,6 +324,24 @@ pub fn update_proto_with_mined_transaction(
     ));
 
     Ok(())
+}
+
+/// Return the payload byte length of the inner kaspa Transaction, or 0 if
+/// no inner tx is present. Used to defend against the wallet daemon
+/// emitting more than one payload-carrying tx in a multi-tx response —
+/// we only mine and validate the last tx, so any earlier tx with a
+/// non-empty payload would be signed and broadcast unvalidated.
+pub fn proto_payload_len(proto_wst: &proto_types::WalletSignableTransaction) -> usize {
+    proto_wst
+        .transaction
+        .as_ref()
+        .and_then(|st| match &st.signed {
+            Some(proto_types::signed_transaction::Signed::Partially(s)) => s.tx.as_ref(),
+            Some(proto_types::signed_transaction::Signed::Fully(s)) => s.tx.as_ref(),
+            None => None,
+        })
+        .map(|tx| tx.payload.len())
+        .unwrap_or(0)
 }
 
 /// Check if proto WalletSignableTransaction is partially signed (for mining)

@@ -5,8 +5,19 @@ use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
-/// Service responsible for all wallet-related operations
-/// Single responsibility: Abstract wallet communication and transaction management
+/// Service responsible for non-payload wallet operations (address lookup,
+/// UTXO consolidation, Entry-tx flows).
+///
+/// **KIP-21 lane enforcement is intentionally disabled** here — every
+/// `WalletCaller::new(.., None)` call in this module reflects that the
+/// `WalletService` surface does not (currently) build payload-carrying
+/// L2 transactions. The lane gate runs only on `WalletCaller` instances
+/// constructed in `main.rs` for the RPC `eth_sendRawTransaction` path.
+///
+/// **Do not** promote `WalletService` to a payload-carrying surface
+/// without also threading `Option<LaneEnforcement>` through this module
+/// from the same config in `main.rs`. Failing to do so would silently
+/// bypass KIP-21 enforcement on the new surface.
 pub struct WalletService {
     wallet_caller: Arc<WalletCaller>,
     config: WalletConfig,
@@ -40,7 +51,7 @@ pub struct SendTransactionRequest {
 impl WalletService {
     /// Create a new WalletService with the given configuration
     pub async fn new(config: WalletConfig) -> Result<Self, WalletServiceError> {
-        let wallet_caller = WalletCaller::new(config.clone())
+        let wallet_caller = WalletCaller::new(config.clone(), None)
             .await
             .map_err(|e| WalletServiceError::InitializationFailed(Box::new(e)))?;
 
@@ -71,7 +82,7 @@ impl WalletService {
         // In real tests, this would be a proper mock
         let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
         let test_wallet_caller = rt.block_on(async {
-            match WalletCaller::new(config.clone()).await {
+            match WalletCaller::new(config.clone(), None).await {
                 Ok(caller) => caller,
                 Err(_) => {
                     // For testing, we'll just panic - in real tests this would be mocked
@@ -203,7 +214,7 @@ impl WalletService {
         );
 
         // Create new wallet caller with updated config
-        let new_wallet_caller = WalletCaller::new(new_config.clone())
+        let new_wallet_caller = WalletCaller::new(new_config.clone(), None)
             .await
             .map_err(|e| WalletServiceError::ConfigurationUpdateFailed(Box::new(e)))?;
 

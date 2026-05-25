@@ -6,10 +6,11 @@ use axum::{
 use igra_rpc_provider::{
     api,
     clients::wallet_caller::WalletCaller,
-    config::AppConfig,
+    config::{lane::LaneMode, AppConfig},
     error::AppError,
     services::{
-        gas_price::GasPriceService, proxy::ProxyService, transaction::start_transaction_processor,
+        gas_price::GasPriceService, lane::LaneEnforcement, proxy::ProxyService,
+        transaction::start_transaction_processor,
     },
     AppState,
 };
@@ -17,7 +18,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::process;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[tokio::main]
@@ -55,7 +56,28 @@ async fn main() -> Result<(), AppError> {
     let transaction_sender = start_transaction_processor(config.clone());
     info!("Transaction processor started");
 
-    let wallet_caller_result = WalletCaller::new(config.wallet.clone()).await;
+    // Resolve lane enforcement. AppConfig::validate already ran resolve()
+    // at startup, so this re-runs the same logic for the actual mode value;
+    // any divergence flows through AppError, not process::exit.
+    let lane_enforcement = match config
+        .lane
+        .resolve()
+        .map_err(|e| AppError::ConfigError(format!("lane (post-validate): {e}")))?
+    {
+        LaneMode::Enforced(id) => Some(
+            LaneEnforcement::new(id, config.mining.tx_id_prefix.clone())
+                .map_err(AppError::ConfigError)?,
+        ),
+        LaneMode::Disabled => {
+            warn!(
+                target: "lane_enforcement",
+                "KIP-21 LANE ENFORCEMENT DISABLED via LANE_ENFORCEMENT_DISABLED=true \
+                 — dev/test mode; DO NOT use in production"
+            );
+            None
+        }
+    };
+    let wallet_caller_result = WalletCaller::new(config.wallet.clone(), lane_enforcement).await;
     if let Err(err) = wallet_caller_result {
         error!("Failed to create WalletCaller: {}", err);
         return Ok(());

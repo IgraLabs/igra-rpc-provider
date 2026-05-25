@@ -5,8 +5,9 @@
 
 use crate::{
     clients::wallet_caller::{TransactionParams, WalletCaller, WalletCallerError},
-    config::AppConfig,
+    config::{lane::LaneMode, AppConfig},
     services::{
+        lane::LaneEnforcement,
         mining::TransactionMiner,
         transaction::{serialize_payload, VERSION},
     },
@@ -16,7 +17,7 @@ use kaspa_addresses::Address;
 use kaspa_consensus_core::constants::SOMPI_PER_KASPA;
 use kaspa_wallet_core::utils::try_kaspa_str_to_sompi;
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 // Constants
 pub const L2_DATA_SIZE: usize = 28;
@@ -114,7 +115,32 @@ impl EntryTransactionService {
     pub async fn new() -> Result<Self, EntryTransactionError> {
         let config = AppConfig::load().map_err(|e| EntryTransactionError::Config(e.to_string()))?;
 
-        let wallet_caller = WalletCaller::new(config.wallet.clone()).await?;
+        // Entry txs carry a real IGRA payload (L2 address + amount), so the
+        // same KIP-21 invariants the RPC `eth_sendRawTransaction` path
+        // enforces must apply here. The CLI honours the operator-level
+        // `LANE_ENFORCEMENT_DISABLED` opt-out only — the only paths that
+        // bypass enforcement are pre-stage UTXO consolidation txs (filtered
+        // inside `WalletCaller::complete_transaction_flow`).
+        let lane_enforcement = match config
+            .lane
+            .resolve()
+            .map_err(EntryTransactionError::Config)?
+        {
+            LaneMode::Enforced(id) => Some(
+                LaneEnforcement::new(id, config.mining.tx_id_prefix.clone())
+                    .map_err(EntryTransactionError::Config)?,
+            ),
+            LaneMode::Disabled => {
+                warn!(
+                    target: "lane_enforcement",
+                    "EntryTransactionService: KIP-21 lane enforcement DISABLED via \
+                     LANE_ENFORCEMENT_DISABLED=true — DO NOT use in production"
+                );
+                None
+            }
+        };
+
+        let wallet_caller = WalletCaller::new(config.wallet.clone(), lane_enforcement).await?;
         let transaction_miner = TransactionMiner::new(config.mining.clone());
         let retry_config = config.retry.clone();
 

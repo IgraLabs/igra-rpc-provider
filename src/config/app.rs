@@ -6,8 +6,8 @@ use tracing::{debug, info};
 
 // Re-export domain-specific configurations
 pub use super::{
-    validate_all_configs, ConfigValidation, GasConfig, MiningConfig, ProxyConfig, RetryConfig,
-    SecurityConfig, ServerConfig, WalletConfig,
+    validate_all_configs, ConfigValidation, GasConfig, LaneConfig, MiningConfig, ProxyConfig,
+    RetryConfig, SecurityConfig, ServerConfig, WalletConfig,
 };
 
 /// Main application configuration that composes all domain-specific configurations
@@ -24,6 +24,9 @@ pub struct AppConfig {
     pub security: SecurityConfig,
     /// Mining configuration
     pub mining: MiningConfig,
+    /// KIP-21 IGRA lane enforcement configuration
+    #[serde(default)]
+    pub lane: LaneConfig,
     /// Gas pricing configuration
     #[serde(default)]
     pub gas: GasConfig,
@@ -67,6 +70,9 @@ impl AppConfig {
             // Mining configuration
             ("TX_ID_PREFIX", "mining.tx_id_prefix"),
             ("MINING_TIMEOUT_SECONDS", "mining.timeout_seconds"),
+            // KIP-21 IGRA lane configuration
+            ("IGRA_LANE_ID", "lane.lane_id"),
+            ("LANE_ENFORCEMENT_DISABLED", "lane.enforcement_disabled"),
             // Gas configuration
             (
                 "MIN_PROTOCOL_FEE_PER_GAS_GWEI",
@@ -129,6 +135,11 @@ impl AppConfig {
             .mining
             .validate()
             .map_err(|e| AppError::ConfigError(format!("Mining config: {e}")))?;
+
+        config
+            .lane
+            .validate()
+            .map_err(|e| AppError::ConfigError(format!("Lane config: {e}")))?;
 
         config
             .gas

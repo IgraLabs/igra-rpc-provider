@@ -161,9 +161,45 @@ cargo test
 
 ---
 
+## 🧰 JSON-RPC Error Codes
+
+App-specific errors returned by `eth_sendRawTransaction` and related write
+paths. Codes outside this table are passed through from the upstream EL
+client unmodified.
+
+| Code     | Symbol                        | Cause / Operator action                                                                                          |
+|----------|-------------------------------|------------------------------------------------------------------------------------------------------------------|
+| `-32000` | Generic server error          | `ConfigError`, `ElCallError`, `JsonRpcError`, `Internal`, `ReadOnlyMode` — see message for the specific subclass. |
+| `-32001` | `InvalidTransactionFormat`    | Raw EVM tx failed RLP decoding or invariant checks.                                                              |
+| `-32002` | `MethodNotAllowed`            | The requested JSON-RPC method is on the deny-list (e.g. `eth_sign`, `eth_sendTransaction`).                      |
+| `-32003` | `InvalidPayload`              | IGRA payload structure rejected before submission to the wallet.                                                 |
+| `-32004` | `SerializationError`          | Internal serialization failure constructing the L2 payload.                                                      |
+| `-32005` | `WalletCallError`             | Generic failure calling the kaswallet daemon.                                                                    |
+| `-32006` | `MiningError`                 | Generic mining failure (rare; specific cases use -32007/-32008/-32010/-32011).                                   |
+| `-32007` | `MiningTimeout`               | Nonce mining exceeded `MINING_TIMEOUT_SECONDS`. Lower difficulty or raise the timeout.                           |
+| `-32008` | `NonceExhaustion`             | All `2^32` nonces tried without matching `TX_ID_PREFIX`. Prefix may be too long for the configured timeout.       |
+| `-32009` | `TransactionCodecError`       | proto↔kaspa encode/decode failed; usually a daemon/RPC version drift.                                            |
+| `-32010` | `MiningConfigError`           | Mining config rejected at startup.                                                                               |
+| `-32011` | `MiningInvalidState`          | Mining hit an invalid transaction state.                                                                         |
+| `-32012` | `WalletError`                 | Wallet daemon returned a structured error.                                                                       |
+| `-32014` | `UtxoExhausted`               | No funds available to send. Top up the wallet.                                                                   |
+| `-32015` | `RetryExhausted`              | Wallet daemon retry budget exceeded (typically chained UTXO exhaustion).                                         |
+| `-32016` | `LaneEnforcementFailed`       | KIP-21 invariant violated. Message names the failing class (`version`/`subnetwork`/`payload`/`prefix`). Full diagnostic — actual lane, expected lane, tx id — is in the server log at `warn!` level. The most common cause is `KASWALLET_SUBNETWORK_ID` not matching `IGRA_LANE_ID`. |
+
+---
+
 ## ⚙️ Configuration
 
 ### Breaking Changes
+
+**v0.4.0** (post-Toccata): KIP-21 lane enforcement is now **required by
+default**. Startup fails unless one of the following is set:
+- `IGRA_LANE_ID=97b10000` (or your deployment's lane namespace), **or**
+- `LANE_ENFORCEMENT_DISABLED=true` (dev/test only; logs a loud warning).
+
+The kaswallet daemon must be configured with a matching
+`KASWALLET_SUBNETWORK_ID`. See the [KIP-21 IGRA Lane Enforcement](#kip-21-igra-lane-enforcement)
+section below.
 
 **v0.3.0**: The environment variable `MINING_REQUIRED_PREFIX` has been renamed to `TX_ID_PREFIX` and the config field `mining.required_prefix` is now `mining.tx_id_prefix`.
 
@@ -183,6 +219,8 @@ To migrate:
 | `TX_ID_PREFIX`          | Required prefix for mined transaction IDs (hex string, e.g., "97b1" or "0x97b1")| `97b1`                   |
 | `EL_WS_URL`             | WebSocket URL of the IGRA EL Client      | Derived from `EL_URL` (ws://, port 8546) |
 | `MINING_TIMEOUT_SECONDS`| Mining timeout in seconds (1-300)        | `10`                             |
+| `IGRA_LANE_ID`          | KIP-21 IGRA lane id as 4-byte namespace (8 lowercase hex chars, no `0x`, e.g. `97b10000`). **Required for production** — startup fails without it unless `LANE_ENFORCEMENT_DISABLED=true`. | _unset_                          |
+| `LANE_ENFORCEMENT_DISABLED` | Dev/test escape hatch: when `true` **and** `IGRA_LANE_ID` is unset, the RPC starts without KIP-21 lane enforcement (legacy native-subnetwork behavior) and logs a loud warning. Do not set in production. | `false` |
 
 Example: Run with a custom node URL.
 ```sh
@@ -193,6 +231,45 @@ Example: Run in read-only mode (blocks all write operations).
 ```sh
 READ_ONLY=true cargo run
 ```
+
+### KIP-21 IGRA Lane Enforcement
+
+Post-Toccata, every `eth_sendRawTransaction` payload-carrying tx must satisfy
+four KIP-21 invariants on broadcast:
+
+1. `tx.version >= TX_VERSION_TOCCATA` (v1).
+2. `tx.subnetwork_id` equals the configured IGRA lane.
+3. `tx.payload` is larger than the 4-byte nonce slot used by mining.
+4. The final tx id starts with the configured `TX_ID_PREFIX` (enforced via
+   the existing nonce-mining loop).
+
+Lane enforcement is **required by default**. Set `IGRA_LANE_ID` to the
+4-byte lane namespace (e.g. `97b10000`) **and** configure the kaswallet
+daemon with a matching `KASWALLET_SUBNETWORK_ID`. The kaswallet daemon
+owns lane construction (setting `subnetwork_id`, picking
+`TX_VERSION_TOCCATA = 1`, and emitting v1 input mass commitments); the
+RPC provider validates the daemon-built tx twice — once before mining
+(catches config mismatch early) and once before broadcast (enforces all
+four invariants including the prefix).
+
+```sh
+# Wallet daemon — see kaswallet docs for the full command
+KASWALLET_SUBNETWORK_ID=97b10000 kaswallet-daemon ...
+
+# RPC provider
+IGRA_LANE_ID=97b10000 TX_ID_PREFIX=97b1 WALLET_DAEMON_URI=... cargo run
+```
+
+**Dev / test only** — to start the RPC without lane enforcement (e.g.
+against a pre-Toccata network or for local testing without a daemon),
+set `LANE_ENFORCEMENT_DISABLED=true`. The RPC will start with a loud
+warning in the log and behave as it did pre-Toccata. **Do not use this
+flag in production.**
+
+Mismatched daemon/RPC configuration surfaces as a JSON-RPC error
+`-32016 "KIP-21 lane enforcement failed: ..."` on the first
+`eth_sendRawTransaction` request; the operator log contains the full
+diagnostic (actual lane, expected lane, tx id, env-var hint).
 
 ---
 
@@ -238,6 +315,7 @@ docker run -p 8535:8535 \
   -e WALLET_DAEMON_URI="http://kaswallet:8082" \
   -e WALLET_TO_ADDRESS="kaspa:qpam..." \
   -e TX_ID_PREFIX="97b2" \
+  -e IGRA_LANE_ID="97b10000" \
   --network your-network \
   igra-rpc-provider
 ```
@@ -254,14 +332,19 @@ Ensure that all required dependencies, such as the IGRA EL Client and the KASPA 
 
 ### **4️⃣ Entry Transaction Sender (Docker)**
 
-The `entry_transaction_sender` binary can also be run via Docker. Make sure to pass all required environment variables explicitly:
+The `entry_transaction_sender` binary can also be run via Docker. Entry txs
+are subject to the same [KIP-21 lane enforcement](#kip-21-igra-lane-enforcement)
+as `eth_sendRawTransaction` — `IGRA_LANE_ID` is required and must match
+the daemon's `KASWALLET_SUBNETWORK_ID`. Make sure to pass all required
+environment variables explicitly:
 
 ```sh
 # Set environment variables in your shell
 export WALLET_TO_ADDRESS='kaspa:qpt9...'
 export WALLET_DAEMON_URI='http://kaswallet:8082'
 export KASWALLET_PASSWORD=''
-export TX_ID_PREFIX='97b2'
+export TX_ID_PREFIX='97b1'
+export IGRA_LANE_ID='97b10000'        # must match the daemon's KASWALLET_SUBNETWORK_ID
 
 # Run entry_transaction_sender - each -e flag passes the variable to the container
 docker run --rm \
@@ -269,6 +352,7 @@ docker run --rm \
   -e WALLET_DAEMON_URI \
   -e KASWALLET_PASSWORD \
   -e TX_ID_PREFIX \
+  -e IGRA_LANE_ID \
   --network your-network \
   --entrypoint /app/entry_transaction_sender \
   igranetwork/rpc-provider:latest \
@@ -277,7 +361,24 @@ docker run --rm \
   --l2-address 0xd850cc8fdd0348f12df47fd597784007c3c05f75
 ```
 
-**Common mistake**: If you set `TX_ID_PREFIX=97b2` in your shell but omit `-e TX_ID_PREFIX` from the docker command, the container will use the default value (`97b1`) instead of your configured value.
+**Common mistakes:**
+
+- Omitting `-e IGRA_LANE_ID` from the docker command (even if exported in
+  your shell) causes the CLI to refuse to start with
+  `Configuration error: Lane config: IGRA_LANE_ID is required`.
+  Environment variables set in your shell are **not** automatically
+  passed to Docker containers — each one needs an explicit `-e` flag.
+- `IGRA_LANE_ID` not matching the daemon's `KASWALLET_SUBNETWORK_ID`
+  produces `-32016 "pre-mining: subnetwork"` on the first request;
+  the server log names both actual and expected values.
+- Setting `TX_ID_PREFIX=97b2` in your shell but omitting
+  `-e TX_ID_PREFIX` from the docker command leaves the container on the
+  default (`97b1`).
+
+For dev or pre-Toccata environments where you want to run the CLI
+without lane enforcement, add `-e LANE_ENFORCEMENT_DISABLED=true` and
+omit `IGRA_LANE_ID`. The container will log a loud warning at startup.
+Never use this flag in production.
 
 ---
 
