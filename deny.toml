@@ -104,6 +104,10 @@ unknown-git = "deny"
 allow-git = [
     "ssh://git@github.com/IgraLabs/kaswallet.git",
     "https://github.com/IgraLabs/rusty-kaspa.git",
+    # Toccata-aware rusty-kaspa (kaspanet upstream branch `toccata`). Used
+    # by both this RPC provider and the kaswallet daemon while the IgraLabs
+    # fork catches up.
+    "https://github.com/kaspanet/rusty-kaspa.git",
 ]
 
 [sources.allow-org]

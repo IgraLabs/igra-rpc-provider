@@ -39,8 +39,8 @@ pub async fn handle_rpc(
 mod tests {
     use crate::api::routing::{json_rpc_error, PayloadInfo, RequestContext};
     use crate::config::{
-        AppConfig, GasConfig, MiningConfig, ProxyConfig, RetryConfig, SecurityConfig, ServerConfig,
-        WalletConfig,
+        AppConfig, GasConfig, LaneConfig, MiningConfig, ProxyConfig, RetryConfig, SecurityConfig,
+        ServerConfig, WalletConfig,
     };
     use crate::error::AppError;
     use crate::types::rpc::RpcRequest;
@@ -87,6 +87,11 @@ mod tests {
                     read_only: self.read_only,
                 },
                 mining: MiningConfig::default(),
+                // Tests intentionally run without KIP-21 lane enforcement
+                // (no real wallet daemon). Use the explicit escape hatch
+                // so the production-safe default (require IGRA_LANE_ID)
+                // can stay required-by-default.
+                lane: LaneConfig::disabled(),
                 gas: GasConfig::default(),
                 retry: RetryConfig::default(),
             }

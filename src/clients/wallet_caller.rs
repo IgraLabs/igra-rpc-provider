@@ -1,7 +1,10 @@
 use crate::config::{RetryConfig, WalletConfig};
 use crate::error::AppError;
+use crate::services::lane::{self, LaneEnforcement, Stage};
 use crate::services::mining::TransactionMiner;
-use crate::types::wallet::{proto_to_signable_transaction, update_proto_with_mined_transaction};
+use crate::types::wallet::{
+    proto_payload_len, proto_to_signable_transaction, update_proto_with_mined_transaction,
+};
 use proto::kaswallet_proto::wallet_client::WalletClient;
 use proto::kaswallet_proto::{
     BroadcastRequest, CreateUnsignedTransactionsRequest, NewAddressRequest, SignRequest,
@@ -59,10 +62,32 @@ pub struct WalletCaller {
     wallet_daemon_client: Mutex<WalletClient<tonic::transport::Channel>>,
     to_address: String,
     password: String,
+    /// `Some` enables KIP-21 enforcement on every payload-carrying tx (RPC
+    /// path); `None` is the legacy unvalidated path used by the entry-tx
+    /// CLI and UTXO-consolidation flows. The non-empty-prefix invariant
+    /// is enforced by `LaneEnforcement::new`, so an empty-prefix footgun
+    /// is unrepresentable at the type level.
+    lane_enforcement: Option<LaneEnforcement>,
 }
 
 impl WalletCaller {
-    pub async fn new(wallet_config: WalletConfig) -> Result<Self, WalletCallerError> {
+    /// Construct a `WalletCaller`. `lane_enforcement` is required at the
+    /// API boundary so every call site explicitly chooses between KIP-21
+    /// enforcement on (the RPC path) and legacy native-subnetwork behavior
+    /// (entry-tx CLI, consolidation, tests). The type system prevents the
+    /// "forgot to opt in" footgun a builder pattern would leave open.
+    ///
+    /// - `Some(LaneEnforcement)` → every payload-carrying tx returned by
+    ///   the daemon is validated against the lane (and Toccata version, and
+    ///   payload length) before mining, and against all four KIP-21
+    ///   invariants (lane + version + payload + final tx-id prefix) before
+    ///   broadcast.
+    /// - `None` → legacy unvalidated behavior; matches the ticket's
+    ///   "pre-stage UTXO consolidation txs stay untouched" rule.
+    pub async fn new(
+        wallet_config: WalletConfig,
+        lane_enforcement: Option<LaneEnforcement>,
+    ) -> Result<Self, WalletCallerError> {
         let mut wallet_daemon_client =
             WalletClient::connect(wallet_config.wallet_daemon_uri.clone())
                 .await
@@ -85,10 +110,20 @@ impl WalletCaller {
             env::VarError::NotUnicode(_) => WalletCallerError::PasswordInvalidUnicode,
         })?;
 
+        match &lane_enforcement {
+            Some(e) => info!(
+                "WalletCaller: KIP-21 lane enforcement ENABLED (lane={}, tx_id_prefix=0x{})",
+                e.lane(),
+                hex::encode(e.tx_id_prefix()),
+            ),
+            None => debug!("WalletCaller: KIP-21 lane enforcement disabled (legacy mode)"),
+        }
+
         Ok(Self {
             wallet_daemon_client: Mutex::new(wallet_daemon_client),
             to_address,
             password,
+            lane_enforcement,
         })
     }
 
@@ -140,12 +175,50 @@ impl WalletCaller {
         );
 
         let last_index = unsigned_transactions.len().saturating_sub(1);
+
+        // Defense-in-depth: we only mine and validate the LAST tx. Earlier
+        // entries must be pre-stage UTXO consolidation txs with empty
+        // payload (native subnetwork). If the daemon ever returns a
+        // payload-carrying staging tx, we'd sign and broadcast an IGRA
+        // payload that bypassed both lane enforcement gates. Fail loudly.
+        // Runs unconditionally — independent of lane enforcement — so the
+        // assumption is enforced even on legacy paths.
+        for (i, ut) in unsigned_transactions[..last_index].iter().enumerate() {
+            let payload_len = proto_payload_len(ut);
+            if payload_len > 0 {
+                error!(
+                    staging_index = i,
+                    payload_len, "wallet daemon returned payload on a staging tx; expected only the last tx to carry payload"
+                );
+                return Err(WalletCallerError::LaneEnforcementFailed(
+                    AppError::LaneEnforcementFailed(format!(
+                        "staging tx {i} carries {payload_len}-byte payload; only the \
+                         last tx in a multi-tx wallet response may carry payload"
+                    )),
+                ));
+            }
+        }
+
         let last_transaction = &unsigned_transactions[last_index];
 
         let signable_tx = proto_to_signable_transaction(last_transaction)
             .map_err(|e| WalletCallerError::TransactionDecodingFailed(e.to_string()))?;
 
         let original_tx_id = signable_tx.id();
+
+        // KIP-21 pre-mining gate: catch a kaswallet/RPC config mismatch
+        // (wrong subnetwork, pre-Toccata version, short payload) before
+        // we burn CPU on prefix mining. The prefix invariant is deferred
+        // to the post-mining gate.
+        if let Some(e) = &self.lane_enforcement {
+            lane::validate_lane_transaction(
+                &signable_tx,
+                e.lane(),
+                e.tx_id_prefix(),
+                Stage::PreMining,
+            )
+            .map_err(WalletCallerError::LaneEnforcementFailed)?;
+        }
 
         info!(
             "Extracted SignableTransaction {}, starting mining",
@@ -156,6 +229,21 @@ impl WalletCaller {
             .mine_transaction(signable_tx)
             .await
             .map_err(WalletCallerError::MiningFailed)?;
+
+        // KIP-21 pre-broadcast gate: enforce all four invariants on the
+        // mined tx. Mining is supposed to guarantee the prefix, but we
+        // re-check here so a bug in the mining loop (or a future change
+        // to `Transaction::finalize`) cannot let a non-conforming tx
+        // through to `sign_transactions`.
+        if let Some(e) = &self.lane_enforcement {
+            lane::validate_lane_transaction(
+                &mined_transaction,
+                e.lane(),
+                e.tx_id_prefix(),
+                Stage::PreBroadcast,
+            )
+            .map_err(WalletCallerError::LaneEnforcementFailed)?;
+        }
 
         info!(
             "Mining completed: {} nonces in {:?}, hash rate: {:.2} H/s",
@@ -455,6 +543,13 @@ pub enum WalletCallerError {
     #[error("Mining failed: {0}")]
     MiningFailed(#[from] crate::error::AppError),
 
+    /// KIP-21 lane gate rejected the daemon-built (pre-mining) or mined
+    /// (pre-broadcast) tx. Kept distinct from `MiningFailed` so logs,
+    /// metrics, and alert routing can tell lane misconfiguration from
+    /// actual mining failures.
+    #[error("Lane enforcement failed: {0}")]
+    LaneEnforcementFailed(crate::error::AppError),
+
     #[error("No transaction IDs returned from broadcast")]
     NoTransactionIds,
 
@@ -504,6 +599,7 @@ impl From<WalletCallerError> for crate::error::AppError {
                 crate::error::AppError::WalletError(format!("Transaction broadcast failed: {e}"))
             }
             WalletCallerError::MiningFailed(e) => e,
+            WalletCallerError::LaneEnforcementFailed(e) => e,
             WalletCallerError::NoTransactionIds => {
                 crate::error::AppError::WalletError("No transaction IDs returned".to_string())
             }
