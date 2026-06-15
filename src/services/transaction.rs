@@ -27,10 +27,6 @@ pub const VERSION: u8 = 0x9;
 /// Maximum number of transactions that can be queued for sequential processing.
 const TRANSACTION_QUEUE_CAPACITY: usize = 1024;
 
-/// Maximum time (in seconds) to wait for a queued transaction to be processed
-/// before returning a timeout error to the caller.
-const PROCESSING_TIMEOUT_SECS: u64 = 120;
-
 /// Transaction type constants for Ethereum transaction types
 pub mod tx_types {
     pub const LEGACY: u8 = 0; // Legacy transaction
@@ -312,7 +308,9 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
     };
 
     let queue_start = std::time::Instant::now();
-    if let Err(e) = state.transaction_sender.send(tx_request).await {
+    // Non-blocking enqueue: on a full queue, fail fast with a parseable JSON-RPC error instead of
+    // blocking the caller (and the upstream proxy) until a slot frees.
+    if let Err(e) = state.transaction_sender.try_send(tx_request) {
         error!(
             "TX [id={}, hash={}]: Failed to queue transaction: {}, available_capacity={}",
             id,
@@ -329,8 +327,14 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
         id, tx_hash_str, queue_time, state.transaction_sender.capacity()
     );
 
+    // Wait for the background processor, bounded by the configured timeout. Operators tune
+    // `server.processing_timeout_seconds` below the reverse-proxy read timeout so we return a
+    // structured JSON-RPC timeout before the proxy truncates the response into an empty body.
+    // Note: on timeout the queued transaction may still be mined and broadcast (fire-and-forget) —
+    // clients should reconcile by transaction hash rather than assume failure.
+    let processing_timeout_secs = state.config.server.processing_timeout_seconds;
     let response = match timeout(
-        Duration::from_secs(PROCESSING_TIMEOUT_SECS),
+        Duration::from_secs(processing_timeout_secs),
         response_receiver.recv(),
     )
     .await
@@ -349,9 +353,9 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
         Err(_) => {
             error!(
                 "TX [id={}, hash={}]: Processing timed out after {}s",
-                id, tx_hash_str, PROCESSING_TIMEOUT_SECS
+                id, tx_hash_str, processing_timeout_secs
             );
-            return TransactionError::processing_timeout(PROCESSING_TIMEOUT_SECS)
+            return TransactionError::processing_timeout(processing_timeout_secs)
                 .to_json_rpc_error(id_value);
         }
     };

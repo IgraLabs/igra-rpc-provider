@@ -1,17 +1,20 @@
 use crate::{api::routing, types::rpc::RpcEnvelope, AppState};
-use axum::{
-    extract::{Json, State},
-    response::IntoResponse,
-};
-use serde_json::Value;
+use axum::{body::Bytes, extract::State, response::IntoResponse, Json};
+use serde_json::{json, Value};
 use std::sync::Arc;
 
 /// Handles JSON-RPC requests and routes them to the appropriate handler.
 /// Supports both single and batch requests, delegating business logic to services.
-pub async fn handle_rpc(
-    State(state): State<Arc<AppState>>,
-    Json(envelope): Json<RpcEnvelope>,
-) -> impl IntoResponse {
+///
+/// The raw body is parsed manually (rather than via axum's `Json` extractor) so that malformed
+/// input returns a proper JSON-RPC error object instead of axum's default plain-text `422`
+/// rejection, mirroring the WebSocket handler.
+pub async fn handle_rpc(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
+    let envelope = match parse_rpc_envelope(&body) {
+        Ok(envelope) => envelope,
+        Err(error_response) => return Json(error_response),
+    };
+
     match envelope {
         RpcEnvelope::Single(req) => Json(routing::route_and_process(&state, req).await),
         RpcEnvelope::Batch(mut requests) => {
@@ -33,6 +36,46 @@ pub async fn handle_rpc(
             Json(Value::Array(responses))
         }
     }
+}
+
+/// Parse a raw HTTP body into an `RpcEnvelope`, returning a ready-made JSON-RPC error object on
+/// failure. Distinguishes `-32700` (the body is not valid JSON) from `-32600` (valid JSON that is
+/// not a valid JSON-RPC request/batch, e.g. a request missing the `jsonrpc` field), recovering the
+/// request `id` when present.
+fn parse_rpc_envelope(body: &[u8]) -> Result<RpcEnvelope, Value> {
+    match serde_json::from_slice::<RpcEnvelope>(body) {
+        Ok(envelope) => Ok(envelope),
+        // The body did not match the envelope; re-parse as a generic value to classify the failure.
+        Err(envelope_err) => match serde_json::from_slice::<Value>(body) {
+            // Valid JSON, but not a valid Request object/batch -> Invalid Request (echo id if present).
+            Ok(value) => {
+                let id = value.get("id").cloned().unwrap_or(Value::Null);
+                Err(rpc_error_with_data(
+                    id,
+                    -32600,
+                    "Invalid Request",
+                    &envelope_err.to_string(),
+                ))
+            }
+            // Not valid JSON at all -> Parse error.
+            Err(parse_err) => Err(rpc_error_with_data(
+                Value::Null,
+                -32700,
+                "Parse error",
+                &parse_err.to_string(),
+            )),
+        },
+    }
+}
+
+/// Build a JSON-RPC error object with a stable `message` and the underlying detail in `data`,
+/// matching the `data` convention used by the domain error types.
+fn rpc_error_with_data(id: Value, code: i32, message: &str, detail: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "error": { "code": code, "message": message, "data": detail },
+        "id": id
+    })
 }
 
 #[cfg(test)]
@@ -76,6 +119,7 @@ mod tests {
                 server: ServerConfig {
                     host: "127.0.0.1".to_string(),
                     port: 8535,
+                    ..Default::default()
                 },
                 proxy: ProxyConfig::with_el_url("http://localhost:12345".to_string()),
                 wallet: WalletConfig {
@@ -309,5 +353,55 @@ mod tests {
         assert_eq!(error_response["id"], json!(1));
         assert_eq!(error_response["error"]["code"], -32600);
         assert_eq!(error_response["error"]["message"], "Invalid Request");
+    }
+}
+
+#[cfg(test)]
+mod parse_envelope_tests {
+    use super::{parse_rpc_envelope, RpcEnvelope};
+    use serde_json::Value;
+
+    #[test]
+    fn valid_single_request_parses() {
+        let body = br#"{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}"#;
+        match parse_rpc_envelope(body) {
+            Ok(RpcEnvelope::Single(req)) => assert_eq!(req.method, "eth_chainId"),
+            other => panic!("expected Single, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn valid_batch_parses() {
+        let body = br#"[{"jsonrpc":"2.0","method":"eth_chainId","id":1}]"#;
+        match parse_rpc_envelope(body) {
+            Ok(RpcEnvelope::Batch(reqs)) => assert_eq!(reqs.len(), 1),
+            other => panic!("expected Batch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_jsonrpc_is_invalid_request_with_recovered_id() {
+        // The reporter's exact case: valid JSON, missing `jsonrpc` -> -32600, echo id.
+        let body = br#"{"id":7,"method":"eth_chainId","params":[]}"#;
+        let err = parse_rpc_envelope(body).expect_err("missing jsonrpc should be an error");
+        assert_eq!(err["jsonrpc"], "2.0");
+        assert_eq!(err["error"]["code"], -32600);
+        assert_eq!(err["error"]["message"], "Invalid Request");
+        assert_eq!(err["id"], 7);
+    }
+
+    #[test]
+    fn invalid_json_is_parse_error_with_null_id() {
+        let body = b"not json at all";
+        let err = parse_rpc_envelope(body).expect_err("invalid json should be an error");
+        assert_eq!(err["error"]["code"], -32700);
+        assert_eq!(err["error"]["message"], "Parse error");
+        assert_eq!(err["id"], Value::Null);
+    }
+
+    #[test]
+    fn empty_body_is_parse_error() {
+        let err = parse_rpc_envelope(b"").expect_err("empty body should be an error");
+        assert_eq!(err["error"]["code"], -32700);
     }
 }

@@ -52,6 +52,10 @@ impl AppConfig {
             // Server configuration
             ("SERVER_HOST", "server.host"),
             ("SERVER_PORT", "server.port"),
+            (
+                "PROCESSING_TIMEOUT_SECONDS",
+                "server.processing_timeout_seconds",
+            ),
             // Proxy configuration (backward compatibility)
             ("EL_URL", "proxy.el_url"),
             ("EL_WS_URL", "proxy.el_ws_url"),

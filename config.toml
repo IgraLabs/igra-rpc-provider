@@ -1,6 +1,9 @@
 [server]
 host = "0.0.0.0"
 port = 8535
+# Max seconds the write path waits for a queued transaction before returning a JSON-RPC timeout.
+# Set just below the reverse-proxy read timeout to avoid empty (truncated) responses under load.
+processing_timeout_seconds = 120
 
 [proxy]
 el_url = "http://execution-layer:8545"
