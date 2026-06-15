@@ -37,6 +37,7 @@ pub mod tx_types {
     pub const EIP2930: u8 = 1; // EIP-2930 (Access List)
     pub const EIP1559: u8 = 2; // EIP-1559 (Fee Market)
     pub const BLOB: u8 = 3; // EIP-4844 (Blob transactions)
+    pub const EIP7702: u8 = 4; // EIP-7702 (Set-Code transactions)
 }
 
 /// Transaction validation context containing all necessary information
@@ -744,12 +745,12 @@ const MAX_TRANSACTION_SIZE: usize = 128 * 1024;
 
 /// Parse RLP-encoded transaction data and return both the transaction and its type.
 ///
-/// Alloy's TxEnvelope automatically handles all transaction types (Legacy, EIP-2930, EIP-1559, EIP-4844)
-/// without requiring manual fallback parsing.
+/// Alloy's TxEnvelope automatically handles all transaction types (Legacy, EIP-2930, EIP-1559,
+/// EIP-4844, EIP-7702) without requiring manual fallback parsing.
 ///
 /// # Security
 /// - Validates input size before decoding to prevent DoS via oversized payloads
-/// - Rejects unsupported transaction types (EIP-4844, EIP-7702)
+/// - Accepts Legacy, EIP-2930, EIP-1559, and EIP-7702; rejects EIP-4844 blob (0x03) and unknown types (>= 0x05)
 pub fn parse_rlp_transaction(data: &[u8]) -> Result<(TxEnvelope, u8), AppError> {
     // Validate size before decoding to prevent DoS attacks
     if data.len() > MAX_TRANSACTION_SIZE {
@@ -767,7 +768,7 @@ pub fn parse_rlp_transaction(data: &[u8]) -> Result<(TxEnvelope, u8), AppError> 
 
     let tx_type = detect_transaction_type(data)?;
 
-    if tx_type >= tx_types::BLOB {
+    if tx_type == tx_types::BLOB || tx_type > tx_types::EIP7702 {
         return Err(AppError::Internal(format!(
             "Unsupported transaction type: {tx_type}"
         )));
@@ -795,6 +796,7 @@ pub fn get_transaction_type_name(tx_type: u8) -> &'static str {
         tx_types::EIP2930 => "EIP-2930",
         tx_types::EIP1559 => "EIP-1559",
         tx_types::BLOB => "EIP-4844 (Blob)",
+        tx_types::EIP7702 => "EIP-7702",
         _ => "Unknown",
     }
 }
@@ -833,9 +835,14 @@ pub fn extract_gas_fees(tx: &TxEnvelope) -> Result<GasFeeInfo, AppError> {
         TxEnvelope::Eip4844(_) => Err(AppError::Internal(
             "EIP-4844 blob transactions are not supported".into(),
         )),
-        TxEnvelope::Eip7702(_) => Err(AppError::Internal(
-            "EIP-7702 transactions are not supported".into(),
-        )),
+        TxEnvelope::Eip7702(signed_tx) => {
+            // EIP-7702 carries the same dynamic-fee fields as EIP-1559, so reuse that variant.
+            let inner = signed_tx.tx();
+            Ok(GasFeeInfo::Eip1559 {
+                max_fee_per_gas: U256::from(inner.max_fee_per_gas),
+                max_priority_fee_per_gas: U256::from(inner.max_priority_fee_per_gas),
+            })
+        }
     }
 }
 
@@ -852,8 +859,8 @@ pub fn validate_gas_fee_with_type(
         tx_types::LEGACY | tx_types::EIP2930 => {
             validate_legacy_or_eip2930(tx, min_protocol_fee, tx_type, tx_hash)
         }
-        tx_types::EIP1559 => validate_eip1559(tx, min_protocol_fee, tx_hash),
-        tx_type if tx_type >= tx_types::BLOB => {
+        tx_types::EIP1559 | tx_types::EIP7702 => validate_eip1559(tx, min_protocol_fee, tx_hash),
+        tx_type if tx_type == tx_types::BLOB || tx_type > tx_types::EIP7702 => {
             error!(
                 "TX_VALIDATION [hash={}]: Unsupported transaction type: {} ({})",
                 tx_hash,
@@ -921,7 +928,8 @@ pub fn validate_legacy_or_eip2930(
     Ok(())
 }
 
-/// Validate EIP-1559 (Type 2) transactions
+/// Validate EIP-1559 (type 0x02) and EIP-7702 (type 0x04) transactions
+/// (both share the same dynamic-fee fields).
 /// Validates:
 /// - EIP-1559 invariant: max_priority_fee_per_gas <= max_fee_per_gas
 /// - max_fee_per_gas >= min_protocol_fee (must cover base fee)
@@ -933,27 +941,38 @@ pub fn validate_eip1559(
 ) -> Result<(), crate::errors::transaction::TransactionError> {
     use crate::errors::transaction::TransactionError;
 
-    let tx_type_name = get_transaction_type_name(tx_types::EIP1559);
-
-    // Extract both fee fields using pattern matching on TxEnvelope
-    let (max_fee_per_gas, max_priority_fee_per_gas) = match tx {
+    // Extract both fee fields and resolve the concrete type using pattern matching on TxEnvelope.
+    // EIP-1559 and EIP-7702 share the same dynamic-fee fields, so both are validated here; the
+    // resolved type drives accurate logging without changing this function's signature.
+    let (max_fee_per_gas, max_priority_fee_per_gas, tx_type) = match tx {
         TxEnvelope::Eip1559(signed_tx) => {
             let inner = signed_tx.tx();
             (
                 U256::from(inner.max_fee_per_gas),
                 U256::from(inner.max_priority_fee_per_gas),
+                tx_types::EIP1559,
+            )
+        }
+        TxEnvelope::Eip7702(signed_tx) => {
+            let inner = signed_tx.tx();
+            (
+                U256::from(inner.max_fee_per_gas),
+                U256::from(inner.max_priority_fee_per_gas),
+                tx_types::EIP7702,
             )
         }
         _ => {
             warn!(
-                "TX_VALIDATION [hash={}]: Expected EIP-1559 transaction, got different type",
+                "TX_VALIDATION [hash={}]: Expected EIP-1559 or EIP-7702 transaction, got different type",
                 tx_hash
             );
-            return Err(TransactionError::invalid_transaction_format(format!(
-                "{tx_type_name} transaction has unexpected envelope type"
-            )));
+            return Err(TransactionError::invalid_transaction_format(
+                "transaction has unexpected envelope type (expected EIP-1559 or EIP-7702)"
+                    .to_string(),
+            ));
         }
     };
+    let tx_type_name = get_transaction_type_name(tx_type);
 
     // EIP-1559 invariant: max_priority_fee_per_gas must not exceed max_fee_per_gas
     if max_priority_fee_per_gas > max_fee_per_gas {
@@ -992,7 +1011,7 @@ pub fn validate_eip1559(
         ));
     }
 
-    log_validation_success(tx_hash, tx_types::EIP1559);
+    log_validation_success(tx_hash, tx_type);
     Ok(())
 }
 
@@ -1121,6 +1140,7 @@ mod tests {
         assert_eq!(get_transaction_type_name(tx_types::EIP2930), "EIP-2930");
         assert_eq!(get_transaction_type_name(tx_types::EIP1559), "EIP-1559");
         assert_eq!(get_transaction_type_name(tx_types::BLOB), "EIP-4844 (Blob)");
+        assert_eq!(get_transaction_type_name(tx_types::EIP7702), "EIP-7702");
         assert_eq!(get_transaction_type_name(255), "Unknown");
     }
 
@@ -1215,6 +1235,17 @@ mod tests {
         let tx_hex = "02f8d7824bd8820b558601d1a94a20018601d1a94a200182bf68940000000000000000000000000000000000feedad80b8645f872f55000000000000000000000000000000000000000000000000000000000026337595a0dc7c603d4296b70f5422daa22482d4afb088b29c426b4c9ec5ef019715a11978688306685db4f631b116ed0eeae19876fc9da3f3517653c8b35dee36ee90c080a01d70b4425acf0c6089788788fc51c1c2ef4e3f18203a2653fd462d9fc16bc0bba06b21e05530fa4d4b4ea243d15b4afcb08728cfbe3b788fcbf11687f542fa446f";
         let tx_bytes = hex::decode(tx_hex).expect("Valid hex string");
         parse_rlp_transaction(&tx_bytes).expect("Should parse test transaction")
+    }
+
+    /// Helper to get a real signed EIP-7702 (set-code, type 0x04) transaction for testing.
+    /// Generated out-of-band with a deterministic key (alloy 1.8.3) and an empty
+    /// authorization_list (encoded as the single byte 0xc0; the RPC layer enforces no non-empty
+    /// minimum, per task scope). max_fee_per_gas == max_priority_fee_per_gas == 2,000,000,000,000
+    /// wei (2000 gwei), matching the EIP-1559 fixture's fee scale so the same thresholds apply.
+    fn get_test_eip7702_tx() -> (TxEnvelope, u8) {
+        let tx_hex = "04f872824bd8808601d1a94a20008601d1a94a2000830186a09400000000000000000000000000000000000000008080c0c080a0580b9a9ddc636ce8399deff5c902d55719a4206a66a27912eda734c08c21eda3a04b536afcd9f3dd7face8c7c00e8734440df51d2de9d8b3155770ca80866b0c86";
+        let tx_bytes = hex::decode(tx_hex).expect("Valid hex string");
+        parse_rlp_transaction(&tx_bytes).expect("Should parse test EIP-7702 transaction")
     }
 
     /// Helper to get a real Legacy transaction for testing
@@ -1382,6 +1413,94 @@ mod tests {
         assert!(
             result.is_ok(),
             "Valid EIP-1559 transaction should pass validation"
+        );
+    }
+
+    #[test]
+    fn test_parse_real_eip7702_transaction() {
+        let (tx, tx_type) = get_test_eip7702_tx();
+
+        // Verify it is detected and decoded as EIP-7702 (type 0x04)
+        assert_eq!(
+            tx_type,
+            tx_types::EIP7702,
+            "Should be detected as EIP-7702 transaction"
+        );
+
+        match &tx {
+            TxEnvelope::Eip7702(signed_tx) => {
+                let inner = signed_tx.tx();
+                assert!(inner.max_fee_per_gas > 0, "Should have max_fee_per_gas");
+                assert!(
+                    inner.max_priority_fee_per_gas > 0,
+                    "Should have max_priority_fee_per_gas"
+                );
+            }
+            _ => panic!("Expected EIP-7702 transaction variant"),
+        }
+    }
+
+    #[test]
+    fn test_validate_gas_fee_with_type_eip7702_success() {
+        let (tx, tx_type) = get_test_eip7702_tx();
+        assert_eq!(tx_type, tx_types::EIP7702);
+
+        // EIP-7702 tx has max_priority_fee ~2000 gwei, so 1000 gwei min should pass
+        let min_protocol_fee = U256::from(1_000_000_000_000u64); // 1000 gwei
+        let result = validate_gas_fee_with_type(&tx, min_protocol_fee, tx_type, "0xtest");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_gas_fee_with_type_eip7702_insufficient_fee() {
+        use crate::errors::transaction::TransactionError;
+
+        let (tx, tx_type) = get_test_eip7702_tx();
+        assert_eq!(tx_type, tx_types::EIP7702);
+
+        // EIP-7702 tx has max_priority_fee ~2000 gwei, so 3000 gwei min should fail
+        let min_protocol_fee = U256::from(3_000_000_000_000u64); // 3000 gwei
+        let result = validate_gas_fee_with_type(&tx, min_protocol_fee, tx_type, "0xtest");
+        assert!(result.is_err());
+        assert!(matches!(
+            result.expect_err("Should fail with insufficient gas fee for EIP-7702"),
+            TransactionError::InsufficientGasFee { .. }
+        ));
+    }
+
+    #[test]
+    fn test_extract_gas_fees_eip7702() {
+        let (tx, _) = get_test_eip7702_tx();
+        let gas_info = extract_gas_fees(&tx).expect("Should extract gas fees");
+
+        // EIP-7702 reuses the Eip1559 fee shape (shared dynamic-fee fields)
+        match gas_info {
+            GasFeeInfo::Eip1559 {
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+            } => {
+                assert!(max_fee_per_gas > U256::ZERO);
+                assert!(max_priority_fee_per_gas > U256::ZERO);
+                // EIP-1559 invariant: priority fee <= max fee
+                assert!(max_priority_fee_per_gas <= max_fee_per_gas);
+            }
+            _ => panic!("Expected EIP-1559 gas fee info for EIP-7702 transaction"),
+        }
+    }
+
+    #[test]
+    fn test_parse_rlp_transaction_type5_rejected() {
+        // Type 0x05 is unknown/unsupported and must stay rejected at the parse gate,
+        // locking the new `tx_type > tx_types::EIP7702` branch of the filter.
+        let type5_data = [0x05, 0xf8, 0x64, 0x01];
+        let result = parse_rlp_transaction(&type5_data);
+        assert!(result.is_err());
+        let error_msg = result
+            .expect_err("Should fail for unsupported type 0x05")
+            .to_string();
+        assert!(
+            error_msg.contains("Unsupported transaction type: 5"),
+            "Expected 'Unsupported transaction type: 5', got: {error_msg}"
         );
     }
 
