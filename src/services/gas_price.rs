@@ -4,7 +4,6 @@ use crate::error::AppError;
 use crate::types::rpc::{Block, JsonRpcResponse};
 use alloy::primitives::U256;
 use serde_json::json;
-#[cfg(test)]
 use serde_json::Value;
 use tracing::info;
 
@@ -102,47 +101,100 @@ impl GasPriceService {
         })
     }
 
-    /// Floors the gas price inside a JSON-RPC response Value (`eth_gasPrice`) in-place.
-    /// If parsing fails or the price is already above the floor, the value is left unchanged.
+    /// Floors a single-quantity JSON-RPC response in-place (`eth_gasPrice` /
+    /// `eth_maxPriorityFeePerGas`). The `result` field is expected to be a `0x`-prefixed hex
+    /// quantity; if parsing fails or the value is already at/above the floor it is left unchanged.
+    /// Flooring `eth_maxPriorityFeePerGas` is what makes default EIP-1559 wallets
+    /// (viem/Rabby/MetaMask) select a tip that satisfies the protocol minimum.
     pub fn floor_gas_price_value(&self, response: &mut serde_json::Value) {
-        // Fast exit if 'result' field is not a string
-        let result = match response.get_mut("result") {
-            Some(val) => val,
-            None => return,
-        };
-
-        // Extract a copy of the current string value
-        let current_hex = match result.as_str() {
-            Some(s) => s,
-            None => return,
-        };
-
-        // Trim prefix and parse.
-        let trimmed = current_hex
-            .trim_start_matches("0x")
-            .trim_start_matches("0X");
-        if trimmed.is_empty() {
-            return;
-        }
-
-        let price_wei = match U256::from_str_radix(trimmed, 16) {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
         let min_floor_wei = match self.min_floor_wei() {
             Ok(v) => v,
             Err(_) => return,
         };
 
-        if price_wei < min_floor_wei {
-            info!(
-                "Flooring gas price in Value. Original: {} Wei, New: {} Wei",
-                price_wei, min_floor_wei
-            );
-            *result = serde_json::Value::String(format!("0x{min_floor_wei:x}"));
+        if let Some(result) = response.get_mut("result") {
+            if floor_hex_quantity_in_place(result, min_floor_wei) {
+                info!(
+                    "Floored single-quantity fee response up to protocol minimum {} wei",
+                    min_floor_wei
+                );
+            }
         }
     }
+
+    /// Floors the `reward` (priority-fee) percentiles inside an `eth_feeHistory` response in-place.
+    ///
+    /// Only `result.reward[][]` is floored — `baseFeePerGas`, `gasUsedRatio`, and `oldestBlock` are
+    /// left untouched. Flooring the tip is sufficient for the protocol floor: the EIP-1559 invariant
+    /// `max_fee_per_gas >= max_priority_fee_per_gas` then guarantees the max fee also meets the floor,
+    /// while leaving `baseFeePerGas` alone avoids inflating the wallet's `maxFee`/balance reservation.
+    /// Missing or malformed fields, and EL error responses (no `result`), are left unchanged.
+    pub fn floor_fee_history_value(&self, response: &mut serde_json::Value) {
+        let min_floor_wei = match self.min_floor_wei() {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        let result = match response.get_mut("result") {
+            Some(result) => result,
+            None => return,
+        };
+
+        // `reward` is a per-block array of per-percentile hex quantities; present only when the
+        // request supplied reward percentiles.
+        let rewards = match result.get_mut("reward").and_then(Value::as_array_mut) {
+            Some(rewards) => rewards,
+            None => return,
+        };
+
+        let mut floored: usize = 0;
+        for per_block in rewards.iter_mut() {
+            if let Some(percentiles) = per_block.as_array_mut() {
+                for entry in percentiles.iter_mut() {
+                    if floor_hex_quantity_in_place(entry, min_floor_wei) {
+                        floored = floored.saturating_add(1);
+                    }
+                }
+            }
+        }
+
+        if floored > 0 {
+            info!(
+                "Floored {} eth_feeHistory reward value(s) up to protocol minimum {} wei",
+                floored, min_floor_wei
+            );
+        }
+    }
+}
+
+/// Floors a single hex-quantity JSON value (e.g. `"0x3b9aca00"`) up to `min_floor_wei`, in place.
+///
+/// Leaves the value untouched when it is not a parseable `0x`-prefixed hex string, or is already
+/// at/above the floor. Returns `true` only when the value was raised to the floor.
+fn floor_hex_quantity_in_place(value: &mut Value, min_floor_wei: U256) -> bool {
+    let current_hex = match value.as_str() {
+        Some(s) => s,
+        None => return false,
+    };
+
+    let trimmed = current_hex
+        .trim_start_matches("0x")
+        .trim_start_matches("0X");
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let price_wei = match U256::from_str_radix(trimmed, 16) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+
+    if price_wei < min_floor_wei {
+        *value = Value::String(format!("0x{min_floor_wei:x}"));
+        return true;
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -353,5 +405,106 @@ mod tests {
             .expect_err("Should fail without baseFeePerGas")
             .to_string()
             .contains("EIP-1559 not active"));
+    }
+
+    // --- eth_maxPriorityFeePerGas (same single-quantity shape as eth_gasPrice) ---
+
+    #[test]
+    fn test_max_priority_fee_below_floor_is_floored() {
+        let service = create_test_service(100);
+        let one_gwei = format!("0x{:x}", gwei_to_wei(1));
+        let mut response = create_test_response_value(&one_gwei);
+        service.floor_gas_price_value(&mut response);
+        assert_eq!(get_price_from_value(&response), gwei_to_wei(100));
+    }
+
+    // --- eth_feeHistory reward flooring ---
+
+    fn fee_history_response(base_fees: Value, reward: Value) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "oldestBlock": "0x1",
+                "baseFeePerGas": base_fees,
+                "gasUsedRatio": [0.5, 0.5],
+                "reward": reward
+            }
+        })
+    }
+
+    fn reward_entry(v: &Value, block: usize, pct: usize) -> U256 {
+        let hex = v["result"]["reward"][block][pct]
+            .as_str()
+            .expect("reward entry should be a string");
+        U256::from_str_radix(hex.trim_start_matches("0x"), 16).expect("Failed to parse hex")
+    }
+
+    #[test]
+    fn test_fee_history_reward_below_floor_is_floored() {
+        let service = create_test_service(100);
+        let one_gwei = format!("0x{:x}", gwei_to_wei(1));
+        let mut response = fee_history_response(
+            json!(["0x1", "0x1"]),
+            json!([["0x0", one_gwei], ["0x0", "0x0"]]),
+        );
+        service.floor_fee_history_value(&mut response);
+        assert_eq!(reward_entry(&response, 0, 0), gwei_to_wei(100));
+        assert_eq!(reward_entry(&response, 0, 1), gwei_to_wei(100));
+        assert_eq!(reward_entry(&response, 1, 0), gwei_to_wei(100));
+    }
+
+    #[test]
+    fn test_fee_history_does_not_touch_base_fee() {
+        let service = create_test_service(100);
+        let mut response = fee_history_response(json!(["0x1", "0x1"]), json!([["0x0"]]));
+        service.floor_fee_history_value(&mut response);
+        // baseFeePerGas must be left untouched (avoids inflating wallet maxFee/balance).
+        assert_eq!(response["result"]["baseFeePerGas"][0], "0x1");
+        assert_eq!(response["result"]["baseFeePerGas"][1], "0x1");
+        // reward still floored.
+        assert_eq!(reward_entry(&response, 0, 0), gwei_to_wei(100));
+    }
+
+    #[test]
+    fn test_fee_history_reward_above_floor_unchanged() {
+        let service = create_test_service(100);
+        let high = format!("0x{:x}", gwei_to_wei(150));
+        let mut response = fee_history_response(json!(["0x1"]), json!([[high]]));
+        service.floor_fee_history_value(&mut response);
+        assert_eq!(reward_entry(&response, 0, 0), gwei_to_wei(150));
+    }
+
+    #[test]
+    fn test_fee_history_missing_reward_is_noop() {
+        let service = create_test_service(100);
+        let mut response = json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": { "oldestBlock": "0x1", "baseFeePerGas": ["0x1"], "gasUsedRatio": [0.5] }
+        });
+        let before = response.clone();
+        service.floor_fee_history_value(&mut response);
+        assert_eq!(response, before);
+    }
+
+    #[test]
+    fn test_fee_history_malformed_entries_unchanged() {
+        let service = create_test_service(100);
+        let mut response = fee_history_response(json!(["0x1"]), json!([[Value::Null, "0xnothex"]]));
+        service.floor_fee_history_value(&mut response);
+        assert_eq!(response["result"]["reward"][0][0], Value::Null);
+        assert_eq!(response["result"]["reward"][0][1], "0xnothex");
+    }
+
+    #[test]
+    fn test_fee_history_error_response_unchanged() {
+        let service = create_test_service(100);
+        let mut response = json!({
+            "jsonrpc": "2.0", "id": 1,
+            "error": { "code": -32000, "message": "boom" }
+        });
+        let before = response.clone();
+        service.floor_fee_history_value(&mut response);
+        assert_eq!(response, before);
     }
 }
