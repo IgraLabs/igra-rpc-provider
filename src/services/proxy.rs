@@ -66,11 +66,21 @@ impl ProxyService {
                 let duration = start.elapsed();
                 let mut final_response = response;
 
-                // If the method is `eth_gasPrice`, floor the result in-place.
-                if method == "eth_gasPrice" {
-                    info!("PROXY [id={}]: Intercepting eth_gasPrice response", id);
-                    self.gas_price_service
-                        .floor_gas_price_value(&mut final_response);
+                // Floor fee-oracle responses so default EIP-1559 wallets build a tip that meets
+                // the protocol minimum. `eth_gasPrice` and `eth_maxPriorityFeePerGas` share the
+                // single hex-quantity result shape; `eth_feeHistory` needs nested reward flooring.
+                match method.as_str() {
+                    "eth_gasPrice" | "eth_maxPriorityFeePerGas" => {
+                        info!("PROXY [id={}]: Intercepting {} response", id, method);
+                        self.gas_price_service
+                            .floor_gas_price_value(&mut final_response);
+                    }
+                    "eth_feeHistory" => {
+                        info!("PROXY [id={}]: Intercepting eth_feeHistory response", id);
+                        self.gas_price_service
+                            .floor_fee_history_value(&mut final_response);
+                    }
+                    _ => {}
                 }
 
                 // Log different response types appropriately
@@ -278,5 +288,62 @@ mod tests {
 
         // Assert
         assert_eq!(proxy_service.get_el_url(), "http://new-url");
+    }
+
+    #[tokio::test]
+    async fn test_proxy_floors_max_priority_fee() {
+        let server = MockServer::start().await;
+        let mock_response = json!({ "jsonrpc": "2.0", "id": 1, "result": "0x3b9aca00" }); // 1 gwei
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mock_response))
+            .mount(&server)
+            .await;
+
+        let gas_price_service =
+            crate::services::gas_price::GasPriceService::new(crate::config::GasConfig {
+                min_protocol_fee_per_gas_gwei: 100,
+            });
+        let proxy_service = ProxyService::new(server.uri(), gas_price_service);
+        let request = create_test_request("eth_maxPriorityFeePerGas", json!([]));
+
+        let response = proxy_service.forward_to_el(request).await;
+
+        // The tip should be floored to 100 Gwei (not the original 1 Gwei).
+        assert_eq!(response.0["result"], "0x174876e800");
+    }
+
+    #[tokio::test]
+    async fn test_proxy_floors_fee_history_reward() {
+        let server = MockServer::start().await;
+        let mock_response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "oldestBlock": "0x1",
+                "baseFeePerGas": ["0x1", "0x1"],
+                "gasUsedRatio": [0.5],
+                "reward": [["0x0", "0x3b9aca00"]]
+            }
+        });
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(mock_response))
+            .mount(&server)
+            .await;
+
+        let gas_price_service =
+            crate::services::gas_price::GasPriceService::new(crate::config::GasConfig {
+                min_protocol_fee_per_gas_gwei: 100,
+            });
+        let proxy_service = ProxyService::new(server.uri(), gas_price_service);
+        let request = create_test_request("eth_feeHistory", json!([]));
+
+        let response = proxy_service.forward_to_el(request).await;
+
+        // Every reward percentile floored to 100 Gwei; baseFeePerGas left untouched.
+        assert_eq!(response.0["result"]["reward"][0][0], "0x174876e800");
+        assert_eq!(response.0["result"]["reward"][0][1], "0x174876e800");
+        assert_eq!(response.0["result"]["baseFeePerGas"][0], "0x1");
     }
 }
