@@ -87,8 +87,10 @@ async fn main() -> Result<(), AppError> {
     );
 
     // Create the new services using dependency injection
+    // Share one GasPriceService (Arc-backed 1s cache) between the proxy's eth_gasPrice flooring
+    // and the synchronous sendRawTransaction accept-path fee check.
     let gas_price_service = GasPriceService::new(config.gas.clone());
-    let proxy_service = ProxyService::new(config.el_url().to_string(), gas_price_service);
+    let proxy_service = ProxyService::new(config.el_url().to_string(), gas_price_service.clone());
 
     // Set up the shared application state
     let ws_semaphore = Arc::new(Semaphore::new(api::ws::MAX_WS_CONNECTIONS));
@@ -97,6 +99,7 @@ async fn main() -> Result<(), AppError> {
         transaction_sender,
         wallet_caller,
         proxy_service,
+        gas_price_service,
         ws_semaphore,
     ));
 

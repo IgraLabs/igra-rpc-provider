@@ -4,7 +4,9 @@
 
 use crate::clients::wallet_caller::WalletCaller;
 use crate::config::AppConfig;
-use crate::services::{proxy::ProxyService, transaction::TransactionRequest};
+use crate::services::{
+    gas_price::GasPriceService, proxy::ProxyService, transaction::TransactionRequest,
+};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Semaphore};
 
@@ -27,6 +29,10 @@ pub struct AppState {
     pub wallet_caller: Arc<WalletCaller>,
     /// Proxy service for EL client communication
     pub proxy_service: ProxyService,
+    /// Shared gas price service (1s-cached effective base fee) used by the synchronous
+    /// `eth_sendRawTransaction` accept path for the fee-floor check. Cloned from the proxy's
+    /// instance so both share one cache.
+    pub gas_price_service: GasPriceService,
     /// Semaphore limiting concurrent WebSocket connections
     pub ws_semaphore: Arc<Semaphore>,
 }
@@ -38,6 +44,7 @@ impl AppState {
         transaction_sender: mpsc::Sender<TransactionRequest>,
         wallet_caller: Arc<WalletCaller>,
         proxy_service: ProxyService,
+        gas_price_service: GasPriceService,
         ws_semaphore: Arc<Semaphore>,
     ) -> Self {
         Self {
@@ -45,6 +52,7 @@ impl AppState {
             transaction_sender,
             wallet_caller,
             proxy_service,
+            gas_price_service,
             ws_semaphore,
         }
     }

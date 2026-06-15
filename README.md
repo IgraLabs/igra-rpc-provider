@@ -123,9 +123,21 @@ It includes the following methods (the list is incomplete).
 ---
 
 ### **Special Handling: `eth_sendRawTransaction`**
-1. Decodes the raw signed transaction.
-2. Calls KASPA Wallet for transaction submission to the Base Layer.
-3. Returns transaction hash if the previous steps succeed.
+
+Submissions follow Ethereum **mempool-accept** semantics: the request is validated
+synchronously and the transaction hash is returned as soon as the transaction is accepted
+into the processing queue.
+
+1. Decodes the raw signed transaction and validates it synchronously (RLP/format, then the
+   EIP-1559/legacy gas-fee floor against the effective base fee).
+2. Enqueues the transaction and **returns the transaction hash immediately** (before
+   Base-Layer submission).
+3. Mining, signing, and L1 broadcast to the KASPA DAG happen **asynchronously** in a
+   background worker. Failures after acceptance are logged/alerted (see below), not returned
+   in the RPC response.
+
+Clients should reconcile by transaction hash — poll `eth_getTransactionReceipt` for inclusion
+rather than treating the `eth_sendRawTransaction` response as confirmation of broadcast.
 
 #### **Example Request**
 ```json
@@ -166,6 +178,16 @@ cargo test
 App-specific errors returned by `eth_sendRawTransaction` and related write
 paths. Codes outside this table are passed through from the upstream EL
 client unmodified.
+
+> **Mempool-accept semantics:** only **synchronous accept-path** errors reach the client —
+> request/format errors (`-32001`/`-32602`), the gas-fee floor (`-32602`,
+> `INSUFFICIENT_GAS_FEE`), base-fee-fetch failure (`-32000`, `BASE_FETCH_FAILED`, retryable),
+> and a full queue (`-32000`, `QUEUE_FULL`, retryable). Failures that occur **after** the hash
+> is returned — mining, wallet/UTXO, signing, L1 broadcast (`-32005`–`-32011`, `-32014`/`-32015`),
+> and KIP-21 lane enforcement (`-32016`, `LaneEnforcementFailed`) — are emitted as structured
+> `transaction_alerts` logs, **not** RPC errors on the `eth_sendRawTransaction` response, and must
+> be reconciled by transaction hash. (The `entry_transaction_sender` CLI submits synchronously and
+> still returns these codes directly.)
 
 | Code     | Symbol                        | Cause / Operator action                                                                                          |
 |----------|-------------------------------|------------------------------------------------------------------------------------------------------------------|
@@ -266,10 +288,15 @@ set `LANE_ENFORCEMENT_DISABLED=true`. The RPC will start with a loud
 warning in the log and behave as it did pre-Toccata. **Do not use this
 flag in production.**
 
-Mismatched daemon/RPC configuration surfaces as a JSON-RPC error
-`-32016 "KIP-21 lane enforcement failed: ..."` on the first
-`eth_sendRawTransaction` request; the operator log contains the full
-diagnostic (actual lane, expected lane, tx id, env-var hint).
+Mismatched daemon/RPC configuration is detected when the background worker
+processes a transaction. Because `eth_sendRawTransaction` now returns the hash
+on mempool-accept (before submission), a lane mismatch is **not** returned as a
+synchronous `-32016` on the request — it is emitted as a `transaction_alerts`
+log (`KIP-21 lane enforcement failed: ...`, severity `critical`) and the
+transaction is not broadcast; reconcile by transaction hash (the receipt never
+appears). The operator log contains the full diagnostic (actual lane, expected
+lane, tx id, env-var hint). (The `entry_transaction_sender` CLI submits
+synchronously and still returns `-32016` directly.)
 
 ---
 

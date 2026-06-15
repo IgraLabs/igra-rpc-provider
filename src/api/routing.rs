@@ -158,7 +158,7 @@ fn log_response(ctx: &RequestContext, result: &Value, duration: std::time::Durat
         if ctx.method == "eth_sendRawTransaction" {
             let tx_hash = result_value.as_str().unwrap_or("unknown");
             info!(
-                "RPC RESPONSE [id={}, hash={}]: Transaction processed successfully, time={:?}, payload_size={} bytes",
+                "RPC RESPONSE [id={}, hash={}]: Transaction accepted (queued), time={:?}, payload_size={} bytes",
                 ctx.id, tx_hash, duration, ctx.payload_info.estimated_size
             );
         } else {
