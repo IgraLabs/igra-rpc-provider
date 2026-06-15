@@ -2,6 +2,7 @@ use crate::clients::wallet_caller::TransactionParams;
 use crate::config::AppConfig;
 use crate::error::AppError;
 use crate::errors::transaction::TransactionError;
+use crate::errors::GasError;
 use crate::errors::ToJsonRpcError;
 use crate::services::gas_price::GasPriceService;
 use crate::services::mining::TransactionMiner;
@@ -15,9 +16,8 @@ use flate2::Compression;
 use serde_json::{json, Value};
 use std::io::Write;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::time::timeout;
+use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -26,10 +26,6 @@ pub const VERSION: u8 = 0x9;
 
 /// Maximum number of transactions that can be queued for sequential processing.
 const TRANSACTION_QUEUE_CAPACITY: usize = 1024;
-
-/// Maximum time (in seconds) to wait for a queued transaction to be processed
-/// before returning a timeout error to the caller.
-const PROCESSING_TIMEOUT_SECS: u64 = 120;
 
 /// Transaction type constants for Ethereum transaction types
 pub mod tx_types {
@@ -78,13 +74,13 @@ impl TransactionValidationContext {
     }
 }
 
-// Structure to represent a transaction request that needs to be processed sequentially
+// Structure to represent a transaction request that needs to be processed sequentially.
+// Fire-and-forget: the synchronous accept path returns the hash to the client as soon as the
+// request is enqueued, so there is no response channel back to the caller.
 pub struct TransactionRequest {
-    pub raw_tx: String,
     pub tx_bytes: Vec<u8>,
     pub id: Value,
     pub app_state: Arc<AppState>,
-    pub response_sender: mpsc::Sender<Result<(), String>>,
 }
 
 /// Creates and starts the background transaction processor
@@ -105,10 +101,10 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
         let mut processed_count: u16 = 0;
         let mut error_count: u16 = 0;
 
-        // Create GasPriceService for fee validation
-        let gas_price_service = GasPriceService::new(config.gas.clone());
-
-        // Process transactions one at a time
+        // Process transactions one at a time. Fee validation already happened synchronously on the
+        // accept path, so the worker only mines, signs, and broadcasts. Base fee is not used
+        // downstream. Failures here are post-accept (the client already received the hash) and are
+        // surfaced as structured `transaction_alerts`, never returned to a caller.
         while let Some(tx_request) = transaction_receiver.recv().await {
             let tx_hash = compute_transaction_hash(&tx_request.tx_bytes);
             let tx_hash_str = format!("{tx_hash:#x}");
@@ -127,46 +123,14 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
 
             // Log full payload bytes
             let full_payload = format!("0x{}", hex::encode(&tx_request.tx_bytes));
+            let payload_size = tx_request.tx_bytes.len();
 
             info!(
                 "TX_PROCESSOR [id={}, hash={}]: Processing transaction, payload_size={}, payload={}",
-                id_str,
-                tx_hash_str,
-                tx_request.tx_bytes.len(),
-                full_payload
+                id_str, tx_hash_str, payload_size, full_payload
             );
 
             let start = std::time::Instant::now();
-
-            // Calculate effective base fee for this processing cycle
-            let effective_base_fee = match gas_price_service
-                .get_effective_base_fee(config.el_url())
-                .await
-            {
-                Ok(fee) => {
-                    info!(
-                        "TX_PROCESSOR [id={}, hash={}]: Effective base fee calculated: {} wei",
-                        id_str, tx_hash_str, fee
-                    );
-                    fee
-                }
-                Err(e) => {
-                    error!(
-                        "TX_PROCESSOR [id={}, hash={}]: Failed to fetch base fee: {}. Rejecting transaction.",
-                        id_str, tx_hash_str, e
-                    );
-                    let error_msg = format!("Failed to fetch base fee: {e}");
-                    let send_response_result =
-                        tx_request.response_sender.send(Err(error_msg)).await;
-                    if let Err(send_err) = send_response_result {
-                        error!(
-                            "TX_PROCESSOR [id={}, hash={}]: Failed to send error response: {}",
-                            id_str, tx_hash_str, send_err
-                        );
-                    }
-                    continue;
-                }
-            };
 
             // Create a Value with the proper ID for passing to process_wallet_call
             let id_value = if tx_request.id.is_null() {
@@ -175,60 +139,43 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
                 tx_request.id.clone()
             };
 
-            // Create validation context for better organization
-            let validation_context = TransactionValidationContext::new(
-                id_str.clone(),
-                tx_request.tx_bytes.clone(),
-                Some(effective_base_fee),
-            );
+            // Mining + signing + L1 broadcast.
+            let process_wallet_result = process_wallet_call(
+                &tx_request.tx_bytes,
+                &config,
+                id_value,
+                tx_request.app_state,
+            )
+            .await;
 
-            // Validate transaction fee before processing
-            let fee_validation_result = validate_transaction_fees(&validation_context);
-
-            // If fee validation failed, don't proceed to wallet call
-            let process_wallet_result = match fee_validation_result {
-                Ok(_) => {
-                    // Call the wallet sequentially for each transaction
-                    process_wallet_call(
-                        &tx_request.tx_bytes,
-                        &config,
-                        id_value,
-                        tx_request.app_state,
-                    )
-                    .await
-                }
-                Err(transaction_error) => {
-                    let error_msg = transaction_error.to_string();
-                    error!(
-                        "TX_PROCESSOR [id={}, hash={}]: Fee validation failed: {}",
-                        id_str, tx_hash_str, error_msg
-                    );
-                    Err(error_msg)
-                }
-            };
-            let response = match process_wallet_result {
+            match process_wallet_result {
                 Ok(_) => {
                     let duration = start.elapsed();
                     processed_count = processed_count.saturating_add(1);
                     info!("TX_PROCESSOR [id={}, hash={}]: Transaction processed successfully, time={:?}, payload_size={}, payload={}, total_success={}, total_errors={}",
-                        id_str, tx_hash_str, duration, tx_request.tx_bytes.len(), full_payload, processed_count, error_count);
-                    Ok(())
+                        id_str, tx_hash_str, duration, payload_size, full_payload, processed_count, error_count);
                 }
                 Err(err) => {
                     let duration = start.elapsed();
                     error_count = error_count.saturating_add(1);
-                    error!("TX_PROCESSOR [id={}, hash={}]: Transaction failed: {}, time={:?}, payload_size={}, total_success={}, total_errors={}",
-                        id_str, tx_hash_str, err, duration, tx_request.tx_bytes.len(), processed_count, error_count);
-                    Err(err)
+                    // The client already received the hash on the accept path, so this failure is
+                    // only observable here. Emit a structured alert mirroring `mining_alerts` so it
+                    // routes through the same pipeline; this is the "never silent" guarantee.
+                    error!(
+                        target: "transaction_alerts",
+                        alert_type = "operational",
+                        alert_severity = "critical",
+                        alert_name = "AsyncTransactionFailed",
+                        id = %id_str,
+                        hash = %tx_hash_str,
+                        payload_size = payload_size,
+                        duration_ms = duration.as_millis(),
+                        total_errors = error_count,
+                        error = %err,
+                        timestamp = %chrono::Utc::now().to_rfc3339(),
+                        "transaction failed after enqueue (client already received hash; reconcile by tx hash)"
+                    );
                 }
-            };
-            // Send the response back to the sender
-            let send_response_result = tx_request.response_sender.send(response).await;
-            if let Err(e) = send_response_result {
-                error!(
-                    "TX_PROCESSOR [id={}, hash={}]: Failed to send response: {}",
-                    id_str, tx_hash_str, e
-                );
             }
         }
     });
@@ -236,7 +183,10 @@ pub fn start_transaction_processor(config: AppConfig) -> mpsc::Sender<Transactio
     transaction_sender
 }
 
-// Process transaction immediately but queue for sequential wallet calls
+// Validate synchronously on the accept path, then enqueue for fire-and-forget background
+// processing. The transaction hash is returned to the client as soon as the transaction is
+// accepted into the queue (Ethereum mempool-accept semantics); mining/signing/broadcast happen
+// asynchronously and are observable via `transaction_alerts`, not the RPC response.
 pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value {
     // If ID is null, generate a UUID
     let id_value = if req.id.is_null() {
@@ -259,117 +209,81 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
         id, full_params
     );
 
-    // Validate transaction
-    let (validation_result, tx_bytes_opt) = validate_transaction_request(&req, None);
-
-    // If validation failed, return the error
-    if let Err(error_json) = validation_result {
-        error!("TX [id={}]: Validation failed: {:?}", id, error_json);
-        return error_json;
-    }
-
-    let tx_bytes = match tx_bytes_opt {
-        Some(bytes) => bytes,
-        None => {
-            // This case should theoretically not be reached if validation passes
-            // but we handle it gracefully to avoid a panic.
-            let err_msg = "Transaction validation passed but no bytes were returned";
-            error!("TX [id={}]: {}", id, err_msg);
-            return json!({
-                "jsonrpc": "2.0",
-                "error": { "code": -32000, "message": err_msg },
-                "id": id_value
-            });
-        }
-    };
-
-    // Log full bytes
-    let full_bytes = format!("0x{}", hex::encode(&tx_bytes));
-
-    debug!(
-        "TX [id={}]: Transaction validated successfully, tx_bytes_len={}, bytes={}",
-        id,
-        tx_bytes.len(),
-        full_bytes
-    );
-
-    // Compute transaction hash immediately
-    let tx_hash = compute_transaction_hash(&tx_bytes);
-    let tx_hash_str = format!("{tx_hash:#x}");
-
-    // Log available capacity
-    let available = state.transaction_sender.capacity();
-    info!("TX [id={}, hash={}]: Computed hash, now queueing for background processing, payload_size={}, available_capacity={}",
-        id, tx_hash_str, tx_bytes.len(), available);
-
-    let (response_sender, mut response_receiver) = mpsc::channel::<Result<(), String>>(1);
-    // Queue the transaction for sequential processing
-    let tx_request = TransactionRequest {
-        raw_tx: req.params[0].as_str().unwrap_or("").to_string(),
-        tx_bytes,
-        id: id_value.clone(),
-        app_state: state.clone(),
-        response_sender,
-    };
-
-    let queue_start = std::time::Instant::now();
-    if let Err(e) = state.transaction_sender.send(tx_request).await {
-        error!(
-            "TX [id={}, hash={}]: Failed to queue transaction: {}, available_capacity={}",
-            id,
-            tx_hash_str,
-            e,
-            state.transaction_sender.capacity()
-        );
-        return TransactionError::queue_full(TRANSACTION_QUEUE_CAPACITY)
-            .to_json_rpc_error(id_value);
-    }
-    let queue_time = queue_start.elapsed();
-    info!(
-        "TX [id={}, hash={}]: Transaction queued successfully, queue_time={:?}, available_capacity={}",
-        id, tx_hash_str, queue_time, state.transaction_sender.capacity()
-    );
-
-    let response = match timeout(
-        Duration::from_secs(PROCESSING_TIMEOUT_SECS),
-        response_receiver.recv(),
+    // Synchronous accept-path validation: format/RLP first, then base-fee fetch (fail-closed),
+    // then the gas-fee floor. Returns the decoded bytes or a ready-to-return JSON-RPC error.
+    let tx_bytes = match validate_accept_request(
+        &req,
+        &id_value,
+        &state.gas_price_service,
+        state.config.el_url(),
     )
     .await
     {
-        Ok(Some(result)) => result,
-        Ok(None) => {
+        Ok(bytes) => bytes,
+        Err(error_json) => {
             error!(
-                "TX [id={}, hash={}]: Response channel closed unexpectedly (processor may have crashed)",
-                id, tx_hash_str
+                "TX [id={}]: Accept-path validation failed: {:?}",
+                id, error_json
             );
-            return TransactionError::InternalError(
-                "Transaction processor channel closed unexpectedly".to_string(),
-            )
-            .to_json_rpc_error(id_value);
-        }
-        Err(_) => {
-            error!(
-                "TX [id={}, hash={}]: Processing timed out after {}s",
-                id, tx_hash_str, PROCESSING_TIMEOUT_SECS
-            );
-            return TransactionError::processing_timeout(PROCESSING_TIMEOUT_SECS)
-                .to_json_rpc_error(id_value);
+            return error_json;
         }
     };
 
-    if let Err(e) = response {
-        return json!({
-            "jsonrpc": "2.0",
-            "error": {
-                "code": -32603,
-                "message": format!("Error processing transaction: {}", e)
-            },
-            "id": id_value
-        });
+    // Compute transaction hash (returned to the client below).
+    let tx_hash = compute_transaction_hash(&tx_bytes);
+    let tx_hash_str = format!("{tx_hash:#x}");
+
+    info!(
+        "TX [id={}, hash={}]: Validated, queueing for background processing, payload_size={}, available_capacity={}",
+        id, tx_hash_str, tx_bytes.len(), state.transaction_sender.capacity()
+    );
+
+    let tx_request = TransactionRequest {
+        tx_bytes,
+        id: id_value.clone(),
+        app_state: state.clone(),
+    };
+
+    // Non-blocking enqueue. With immediate return there is no caller-side deadline, so a full
+    // queue must fail fast (retryable -32000) rather than park the handler. A closed channel means
+    // the worker is gone — surface it as a critical alert, not a silent -32603.
+    match state.transaction_sender.try_send(tx_request) {
+        Ok(()) => {
+            info!(
+                "TX [id={}, hash={}]: Transaction accepted into queue, available_capacity={}",
+                id,
+                tx_hash_str,
+                state.transaction_sender.capacity()
+            );
+        }
+        Err(TrySendError::Full(_)) => {
+            error!(
+                "TX [id={}, hash={}]: Queue full, rejecting (backpressure), capacity={}",
+                id, tx_hash_str, TRANSACTION_QUEUE_CAPACITY
+            );
+            return TransactionError::queue_full(TRANSACTION_QUEUE_CAPACITY)
+                .to_json_rpc_error(id_value);
+        }
+        Err(TrySendError::Closed(_)) => {
+            error!(
+                target: "transaction_alerts",
+                alert_type = "operational",
+                alert_severity = "critical",
+                alert_name = "WorkerChannelClosed",
+                id = %id,
+                hash = %tx_hash_str,
+                timestamp = %chrono::Utc::now().to_rfc3339(),
+                "transaction processor channel closed; worker is gone"
+            );
+            return TransactionError::InternalError(
+                "Transaction processor channel closed".to_string(),
+            )
+            .to_json_rpc_error(id_value);
+        }
     }
 
     debug!(
-        "TX [id={}, hash={}]: Returning hash to client",
+        "TX [id={}, hash={}]: Returning hash to client (mempool-accept)",
         id, tx_hash_str
     );
     json!({
@@ -377,6 +291,68 @@ pub async fn process_transaction(req: RpcRequest, state: Arc<AppState>) -> Value
         "result": tx_hash_str,
         "id": id_value
     })
+}
+
+/// Synchronous accept-path validation for `eth_sendRawTransaction`.
+///
+/// Ordering is deliberate and load-bearing:
+/// 1. Format/RLP/size validation runs FIRST with no I/O, so malformed input is rejected with its
+///    format code (`-32602`/`-32001`/`-32700`) even when the EL is unreachable, and garbage never
+///    triggers an EL round-trip.
+/// 2. The effective base fee is fetched (1s-cached). Failure is **fail-closed** for well-formed
+///    transactions: a retryable `-32000` (`GasError::BaseFetchFailed`).
+/// 3. The gas-fee floor is enforced against the effective base fee, reusing `validate_transaction_fees`
+///    on the already-decoded bytes (`InsufficientGasFee` -> `-32602`).
+///
+/// Returns the decoded transaction bytes on success, or a ready-to-return JSON-RPC error `Value`.
+async fn validate_accept_request(
+    req: &RpcRequest,
+    id_value: &Value,
+    gas_price_service: &GasPriceService,
+    el_url: &str,
+) -> Result<Vec<u8>, Value> {
+    // 1. Format / RLP / size validation (no I/O; base fee intentionally `None` to skip the fee gate).
+    //    On failure the error `Value` propagates unchanged (the function's error type is `Value`).
+    let (format_result, tx_bytes_opt) = validate_transaction_request(req, None);
+    format_result?;
+    let tx_bytes = match tx_bytes_opt {
+        Some(bytes) => bytes,
+        None => {
+            // Should be unreachable when validation passes; handled to avoid a panic.
+            return Err(json!({
+                "jsonrpc": "2.0",
+                "error": { "code": -32000, "message": "Transaction validation passed but no bytes were returned" },
+                "id": id_value
+            }));
+        }
+    };
+
+    // 2. Fetch the effective base fee (fail-closed for well-formed transactions).
+    let effective_base_fee = match gas_price_service.get_effective_base_fee(el_url).await {
+        Ok(fee) => fee,
+        Err(e) => {
+            warn!(
+                "TX [id={}]: base fee fetch failed; rejecting (fail-closed): {}",
+                id_value, e
+            );
+            return Err(
+                GasError::base_fetch_failed(e.to_string()).to_json_rpc_error(id_value.clone())
+            );
+        }
+    };
+
+    // 3. Enforce the gas-fee floor against the effective base fee, reusing the existing helper on
+    //    the already-decoded bytes (no second hex decode).
+    let fee_ctx = TransactionValidationContext::new(
+        extract_transaction_id(req),
+        tx_bytes.clone(),
+        Some(effective_base_fee),
+    );
+    if let Err(tx_err) = validate_transaction_fees(&fee_ctx) {
+        return Err(tx_err.to_json_rpc_error(id_value.clone()));
+    }
+
+    Ok(tx_bytes)
 }
 
 /// Validates transaction fees using the validation context
@@ -1565,5 +1541,195 @@ mod tests {
             result.len() > small_data.len(),
             "Small data should be larger after compression"
         );
+    }
+
+    // ---- Accept-path tests (ENG-1145: synchronous validate_accept_request) ----
+
+    /// Real legacy transaction with gas_price = 20 gwei (same fixture as get_test_legacy_tx).
+    const LEGACY_TX_HEX_20GWEI: &str = "f86c098504a817c800825208943535353535353535353535353535353535353535880de0b6b3a76400008025a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83";
+
+    const GWEI: u128 = 1_000_000_000;
+
+    fn make_send_raw_tx_request(raw_tx: &str) -> RpcRequest {
+        RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "eth_sendRawTransaction".to_string(),
+            params: json!([raw_tx]),
+            id: json!(1),
+        }
+    }
+
+    fn gas_service(min_protocol_fee_per_gas_gwei: u64) -> GasPriceService {
+        GasPriceService::new(crate::config::GasConfig {
+            min_protocol_fee_per_gas_gwei,
+        })
+    }
+
+    /// Mount an `eth_getBlockByNumber` response returning `base_fee_wei` on the mock EL server.
+    async fn mount_base_fee(server: &wiremock::MockServer, base_fee_wei: u128) {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, ResponseTemplate};
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "number": "0x1b4",
+                "hash": "0xabc",
+                "baseFeePerGas": format!("0x{base_fee_wei:x}")
+            }
+        });
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(server)
+            .await;
+    }
+
+    fn err_code(v: &Value) -> i64 {
+        v["error"]["code"]
+            .as_i64()
+            .expect("error.code should be present")
+    }
+
+    /// Format-first ordering: a malformed transaction must return its format code even when the EL
+    /// is unreachable, and the EL must not be contacted at all (no DoS surface from garbage).
+    #[tokio::test]
+    async fn accept_malformed_tx_returns_format_code_even_when_el_down() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // The EL returns 500, so a base-fee fetch WOULD fail if attempted.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let gas = gas_service(100);
+
+        // Valid hex but not a valid RLP transaction -> format error (-32602), never -32000.
+        let req = make_send_raw_tx_request("0x1234");
+        let id = json!(1);
+        let result = validate_accept_request(&req, &id, &gas, &server.uri()).await;
+
+        let err = result.expect_err("malformed tx must be rejected");
+        assert_eq!(
+            err_code(&err),
+            -32602,
+            "malformed input must return its format code, not the base-fetch -32000"
+        );
+        assert_eq!(
+            err["error"]["data"]["error_code"],
+            "INVALID_TRANSACTION_FORMAT"
+        );
+        let received = server.received_requests().await.unwrap_or_default();
+        assert!(
+            received.is_empty(),
+            "format-first: the EL must not be contacted for malformed input"
+        );
+    }
+
+    /// Format-first also covers the -32001 path (missing 0x prefix / invalid hex), an AppError
+    /// surfaced before any EL contact. Plan step 9(a) asked for both -32001 and -32602.
+    #[tokio::test]
+    async fn accept_no_prefix_tx_returns_minus32001_even_when_el_down() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let gas = gas_service(100);
+
+        // No "0x" prefix -> extract_raw_transaction rejects with InvalidTransactionFormat (-32001).
+        let req = make_send_raw_tx_request("deadbeef");
+        let id = json!(1);
+        let result = validate_accept_request(&req, &id, &gas, &server.uri()).await;
+
+        let err = result.expect_err("no-0x-prefix tx must be rejected");
+        assert_eq!(
+            err_code(&err),
+            -32001,
+            "hex/prefix format error must return -32001, not the base-fetch -32000"
+        );
+        let received = server.received_requests().await.unwrap_or_default();
+        assert!(
+            received.is_empty(),
+            "format-first: the EL must not be contacted for malformed input"
+        );
+    }
+
+    /// Fail-closed: a well-formed tx whose base fee cannot be fetched is rejected with a retryable
+    /// -32000 (BASE_FETCH_FAILED), not silently accepted.
+    #[tokio::test]
+    async fn accept_base_fee_fetch_failure_is_fail_closed_32000() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let gas = gas_service(10);
+
+        let req = make_send_raw_tx_request(&format!("0x{LEGACY_TX_HEX_20GWEI}"));
+        let id = json!(1);
+        let result = validate_accept_request(&req, &id, &gas, &server.uri()).await;
+
+        let err = result.expect_err("base-fee fetch failure must reject (fail-closed)");
+        assert_eq!(err_code(&err), -32000, "fail-closed retryable server error");
+        assert_eq!(err["error"]["data"]["error_code"], "BASE_FETCH_FAILED");
+        assert_eq!(err["error"]["data"]["retryable"], true);
+    }
+
+    /// Fee floor is enforced synchronously on the accept path (the sharp edge): a tx priced below
+    /// the effective base fee is rejected with -32602 INSUFFICIENT_GAS_FEE.
+    #[tokio::test]
+    async fn accept_below_floor_returns_insufficient_gas_fee_32602() {
+        let server = wiremock::MockServer::start().await;
+        // Network base fee 5 gwei, protocol floor 30 gwei -> effective 30 gwei.
+        mount_base_fee(&server, 5 * GWEI).await;
+        let gas = gas_service(30);
+
+        // Legacy tx gas_price is 20 gwei < 30 gwei floor.
+        let req = make_send_raw_tx_request(&format!("0x{LEGACY_TX_HEX_20GWEI}"));
+        let id = json!(1);
+        let result = validate_accept_request(&req, &id, &gas, &server.uri()).await;
+
+        let err = result.expect_err("below-floor fee must be rejected synchronously");
+        assert_eq!(err_code(&err), -32602);
+        assert_eq!(err["error"]["data"]["error_code"], "INSUFFICIENT_GAS_FEE");
+    }
+
+    /// Happy path: a well-formed, sufficiently-priced tx returns its decoded bytes for enqueue.
+    #[tokio::test]
+    async fn accept_at_or_above_floor_returns_bytes() {
+        let server = wiremock::MockServer::start().await;
+        // Network base fee 5 gwei, floor 10 gwei -> effective 10 gwei <= tx's 20 gwei.
+        mount_base_fee(&server, 5 * GWEI).await;
+        let gas = gas_service(10);
+
+        let req = make_send_raw_tx_request(&format!("0x{LEGACY_TX_HEX_20GWEI}"));
+        let id = json!(1);
+        let result = validate_accept_request(&req, &id, &gas, &server.uri()).await;
+
+        let bytes = result.expect("well-formed, sufficiently-priced tx must be accepted");
+        assert_eq!(
+            bytes,
+            hex::decode(LEGACY_TX_HEX_20GWEI).expect("valid hex"),
+            "accepted bytes must match the submitted transaction"
+        );
+    }
+
+    /// Backpressure contract: a full queue maps to a retryable -32000 QUEUE_FULL (the try_send
+    /// Full arm returns exactly this).
+    #[test]
+    fn queue_full_maps_to_retryable_32000() {
+        let err =
+            TransactionError::queue_full(TRANSACTION_QUEUE_CAPACITY).to_json_rpc_error(json!(1));
+        assert_eq!(err_code(&err), -32000);
+        assert_eq!(err["error"]["data"]["error_code"], "QUEUE_FULL");
+        assert_eq!(err["error"]["data"]["retryable"], true);
     }
 }
