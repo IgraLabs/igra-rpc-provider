@@ -41,6 +41,26 @@ const CONFIG_ENV_VARS: &[&str] = &[
     "KASWALLET_PASSWORD",
 ];
 
+/// Proxy variables are not config mappings, but `reqwest` honours them: the provider's EL client is
+/// built without `.no_proxy()` (`src/clients/el_caller.rs`), so on a runner with a system proxy
+/// exported, the child's loopback traffic to the mock EL would be routed through it and this test
+/// would fail for a reason unrelated to what it checks.
+///
+/// Removing these is necessary but not sufficient. `reqwest`'s default `system-proxy` feature also
+/// reads OS-level proxy settings on macOS and Windows when the variables are absent, and that path
+/// has no loopback exemption — so the child is additionally given `NO_PROXY=*`, whose bypass list
+/// survives system discovery.
+const PROXY_ENV_VARS: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+];
+
 const CHAIN_ID: &str = "0x14da";
 const VALID_KASPA_ADDRESS: &str =
     "kaspatest:qpv8hxvmtvu0tjruup8y5ggqnx9qt5cre32vxrk8073v28w94g99xt57cy60h";
@@ -64,9 +84,10 @@ fn provider_command() -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    for key in CONFIG_ENV_VARS {
+    for key in CONFIG_ENV_VARS.iter().chain(PROXY_ENV_VARS.iter()) {
         command.env_remove(key);
     }
+    command.env("NO_PROXY", "*");
 
     command
 }
@@ -130,7 +151,12 @@ async fn collect_output(child: &mut Child) -> String {
 }
 
 async fn rpc_call(port: u16, rpc_method: &str, params: Value) -> Value {
-    let client = reqwest::Client::new();
+    // `.no_proxy()` for the same reason the child's proxy variables are scrubbed: a system proxy
+    // must not intercept loopback traffic to the provider.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("should be able to build an HTTP client");
     let response = client
         .post(format!("http://127.0.0.1:{port}"))
         .json(&json!({
@@ -210,8 +236,10 @@ async fn read_only_serves_without_wallet_or_lane_configuration() {
     );
     assert_eq!(write["id"], json!(1), "response should echo the request id");
 
-    // The rejection must come from the gate, not from something downstream that already forwarded
-    // the transaction. If this ever fails, a read-only node is broadcasting.
+    // Guards against a future `route_request_to_service` change that let a write fall through to the
+    // proxy. Note this is narrower than it may look: `eth_sendRawTransaction` is routed to the
+    // transaction service rather than the EL, so removing the read-only gate alone would not put it
+    // here either. The `-32000` assertions above are what pin the gate itself.
     let requests = mock_el
         .received_requests()
         .await
@@ -269,5 +297,12 @@ async fn read_write_exits_non_zero_when_wallet_is_unreachable() {
     assert!(
         logs.contains("Failed to create WalletCaller"),
         "exit should be attributable to wallet initialization, got: {logs}"
+    );
+
+    // Read-only mode suppresses lane resolution, but a read-write deployment taking the escape hatch
+    // must still be told loudly. This run is exactly that configuration, so pin it here.
+    assert!(
+        logs.contains("KIP-21 LANE ENFORCEMENT DISABLED"),
+        "read-write deployments opting out of lane enforcement must still be warned, got: {logs}"
     );
 }

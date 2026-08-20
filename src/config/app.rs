@@ -382,9 +382,13 @@ mod tests {
             tx_id_prefix = [0x97, 0xb1]
         "#;
 
+        let error = match deserialize(toml) {
+            Ok(_) => panic!("a partially specified [wallet] section must not deserialize"),
+            Err(error) => error.to_string(),
+        };
         assert!(
-            deserialize(toml).is_err(),
-            "a partially specified [wallet] section must not deserialize"
+            error.contains("to_address"),
+            "the error should name the missing wallet field, got: {error}"
         );
     }
 }
