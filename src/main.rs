@@ -92,8 +92,12 @@ async fn main() -> Result<(), AppError> {
         match WalletCaller::new(config.wallet.clone(), lane_enforcement).await {
             Ok(caller) => Some(Arc::new(caller)),
             Err(err) => {
+                // Exit non-zero so supervision can tell a failed start from a clean shutdown.
+                // Returning Err here would also exit non-zero, but main's Result termination
+                // prints the derived Debug form rather than the Display message already logged
+                // above, so this matches the other fatal startup paths instead.
                 error!("Failed to create WalletCaller: {}", err);
-                return Ok(());
+                process::exit(1);
             }
         }
     };

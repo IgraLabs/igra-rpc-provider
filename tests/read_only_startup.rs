@@ -10,8 +10,9 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
-use tokio::time::Instant;
+use tokio::time::{timeout, Instant};
 use wiremock::matchers::{body_partial_json, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -41,19 +42,16 @@ const CONFIG_ENV_VARS: &[&str] = &[
 ];
 
 const CHAIN_ID: &str = "0x14da";
+const VALID_KASPA_ADDRESS: &str =
+    "kaspatest:qpv8hxvmtvu0tjruup8y5ggqnx9qt5cre32vxrk8073v28w94g99xt57cy60h";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Kills the child on drop so a failing assertion cannot leave a server running.
-struct ChildGuard(Child);
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.0.start_kill();
-    }
-}
+const EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The provider binary, with a sanitized environment and the repository root as its working
 /// directory so `File::with_name("config").required(true)` resolves the checked-in `config.toml`.
+///
+/// `kill_on_drop` means a panicking assertion cannot leave a server running: the `Child` is dropped
+/// while unwinding and the process is killed with it.
 ///
 /// `RUST_LOG` is set rather than merely removed: `EnvFilter::try_from_default_env()` reads it, and a
 /// parent exporting `RUST_LOG=off` would otherwise suppress the log lines these tests assert on.
@@ -89,7 +87,7 @@ fn reserve_port() -> u16 {
 /// Wait until the child accepts TCP connections. Readiness is deliberately probed on connect rather
 /// than by sending RPC requests, so polling does not inflate the EL mock's request count.
 async fn wait_until_serving(port: u16, child: &mut Child) {
-    let deadline = Instant::now();
+    let started = Instant::now();
 
     loop {
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -99,16 +97,36 @@ async fn wait_until_serving(port: u16, child: &mut Child) {
             return;
         }
 
+        // An early exit is the interesting failure, and it has two very different causes: the
+        // startup regression this test exists to catch, or a lost race for the reserved port. Report
+        // the child's own logs so they are not mistaken for each other.
         if let Ok(Some(status)) = child.try_wait() {
-            panic!("provider exited before serving: {status}");
+            let logs = collect_output(child).await;
+            panic!("provider exited before serving ({status}); output:\n{logs}");
         }
 
-        if deadline.elapsed() > STARTUP_TIMEOUT {
+        if started.elapsed() > STARTUP_TIMEOUT {
             panic!("provider did not start serving within {STARTUP_TIMEOUT:?}");
         }
 
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// Drain whatever the child has written so far. Used only on the failure path.
+async fn collect_output(child: &mut Child) -> String {
+    let mut combined = String::new();
+
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = stdout.read_to_string(&mut combined).await;
+    }
+    if let Some(mut stderr) = child.stderr.take() {
+        let mut buffer = String::new();
+        let _ = stderr.read_to_string(&mut buffer).await;
+        combined.push_str(&buffer);
+    }
+
+    combined
 }
 
 async fn rpc_call(port: u16, rpc_method: &str, params: Value) -> Value {
@@ -158,7 +176,7 @@ async fn read_only_serves_without_wallet_or_lane_configuration() {
     let mock_el = start_mock_el().await;
     let port = reserve_port();
 
-    let child = provider_command()
+    let mut child = provider_command()
         .env("READ_ONLY", "true")
         .env("SERVER_HOST", "127.0.0.1")
         .env("SERVER_PORT", port.to_string())
@@ -170,8 +188,7 @@ async fn read_only_serves_without_wallet_or_lane_configuration() {
         .spawn()
         .expect("provider binary should spawn");
 
-    let mut guard = ChildGuard(child);
-    wait_until_serving(port, &mut guard.0).await;
+    wait_until_serving(port, &mut child).await;
 
     // Reads are proxied to the EL, so answering at all proves the whole startup path completed.
     let chain_id = rpc_call(port, "eth_chainId", json!([])).await;
@@ -205,5 +222,52 @@ async fn read_only_serves_without_wallet_or_lane_configuration() {
     assert!(
         !forwarded_write,
         "read-only mode forwarded a write method to the EL"
+    );
+}
+
+/// A read-write deployment that cannot reach its wallet daemon must fail loudly.
+///
+/// It used to log the error and return `Ok(())`, so the process exited 0 and, under
+/// `restart: unless-stopped`, crash-looped while looking like a clean shutdown to anything watching
+/// exit codes. The exit code is asserted alongside the diagnostic, because a bare non-zero status
+/// could just as easily come from an unrelated configuration failure.
+#[tokio::test]
+async fn read_write_exits_non_zero_when_wallet_is_unreachable() {
+    // Reserve and release, so the address is refused rather than merely assumed to be closed.
+    let refused_port = reserve_port();
+
+    let child = provider_command()
+        .env("READ_ONLY", "false")
+        // Satisfies lane validation so the run reaches the wallet. Using the escape hatch inside a
+        // read-write test does not revive it as a read-only workaround.
+        .env("LANE_ENFORCEMENT_DISABLED", "true")
+        .env(
+            "WALLET_DAEMON_URI",
+            format!("http://127.0.0.1:{refused_port}"),
+        )
+        .env("WALLET_TO_ADDRESS", VALID_KASPA_ADDRESS)
+        .spawn()
+        .expect("provider binary should spawn");
+
+    let output = timeout(EXIT_TIMEOUT, child.wait_with_output())
+        .await
+        .expect("provider should exit rather than hang when the wallet is unreachable")
+        .expect("should be able to collect provider output");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "unreachable wallet daemon should exit 1, got {:?}",
+        output.status
+    );
+
+    let logs = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        logs.contains("Failed to create WalletCaller"),
+        "exit should be attributable to wallet initialization, got: {logs}"
     );
 }
