@@ -1,7 +1,12 @@
 use serde::Deserialize;
 
 /// Wallet connection configuration
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Default` (empty strings) exists so `AppConfig`'s `#[serde(default)]` can supply this section when a
+/// read-only deployment omits `[wallet]` entirely. The fields themselves carry no serde defaults, so a
+/// partially specified `[wallet]` table stays a hard deserialization error rather than silently
+/// defaulting a mistyped key.
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct WalletConfig {
     /// Wallet daemon URI
     pub wallet_daemon_uri: String,
