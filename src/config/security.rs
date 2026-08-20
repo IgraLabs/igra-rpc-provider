@@ -44,6 +44,16 @@ impl SecurityConfig {
     }
 
     /// Check if read-only mode is enabled
+    ///
+    /// This is the single definition of "this deployment is read-only". Three places depend on it and
+    /// must stay consistent — if you change what read-only means, check all three:
+    ///
+    /// - `api::routing::validate_request_authorization` rejects write methods with `-32000`.
+    /// - `config::app::AppConfig::validate_config` skips wallet and lane validation.
+    /// - `main` skips lane resolution and wallet daemon initialization.
+    ///
+    /// Do not add a second flag or copy this into a boolean elsewhere. A deployment that skipped the
+    /// wallet while still accepting writes would fail at submission time rather than at the gate.
     pub fn is_read_only(&self) -> bool {
         self.read_only
     }

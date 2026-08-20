@@ -50,38 +50,45 @@ async fn main() -> Result<(), AppError> {
     info!("Listening on: {}", addr);
     info!("EL client URL: {}", config.el_url());
     info!("EL WebSocket URL: {}", config.proxy.el_ws_url());
-    info!("KASPA wallet: {}", config.wallet.wallet_daemon_uri);
+    if config.security.is_read_only() {
+        info!("KASPA wallet: none (read-only mode)");
+    } else {
+        info!("KASPA wallet: {}", config.wallet.wallet_daemon_uri);
+    }
 
     // Start the transaction processor and get the sender
     let transaction_sender = start_transaction_processor(config.clone());
     info!("Transaction processor started");
 
-    // Resolve lane enforcement. AppConfig::validate already ran resolve()
-    // at startup, so this re-runs the same logic for the actual mode value;
-    // any divergence flows through AppError, not process::exit.
-    let lane_enforcement = match config
-        .lane
-        .resolve()
-        .map_err(|e| AppError::ConfigError(format!("lane (post-validate): {e}")))?
-    {
-        LaneMode::Enforced(id) => Some(
-            LaneEnforcement::new(id, config.mining.tx_id_prefix.clone())
-                .map_err(AppError::ConfigError)?,
-        ),
-        LaneMode::Disabled => {
-            warn!(
-                target: "lane_enforcement",
-                "KIP-21 LANE ENFORCEMENT DISABLED via LANE_ENFORCEMENT_DISABLED=true \
-                 — dev/test mode; DO NOT use in production"
-            );
-            None
-        }
-    };
-
+    // Lane enforcement and the wallet are both submission-only concerns, so read-only mode resolves
+    // neither. Resolving the lane outside this branch would defeat the point: `validate_config` skips
+    // `lane.validate()` in read-only mode, but `resolve()` here would still reject a missing
+    // IGRA_LANE_ID and kill startup.
     let wallet_caller: Option<Arc<WalletCaller>> = if config.security.is_read_only() {
-        info!("Read-only mode enabled — skipping wallet initialization");
+        info!("Read-only mode enabled — skipping lane enforcement and wallet initialization");
         None
     } else {
+        // AppConfig::validate already ran resolve() at startup, so this re-runs the same logic for
+        // the actual mode value; any divergence flows through AppError, not process::exit.
+        let lane_enforcement = match config
+            .lane
+            .resolve()
+            .map_err(|e| AppError::ConfigError(format!("lane (post-validate): {e}")))?
+        {
+            LaneMode::Enforced(id) => Some(
+                LaneEnforcement::new(id, config.mining.tx_id_prefix.clone())
+                    .map_err(AppError::ConfigError)?,
+            ),
+            LaneMode::Disabled => {
+                warn!(
+                    target: "lane_enforcement",
+                    "KIP-21 LANE ENFORCEMENT DISABLED via LANE_ENFORCEMENT_DISABLED=true \
+                     — dev/test mode; DO NOT use in production"
+                );
+                None
+            }
+        };
+
         match WalletCaller::new(config.wallet.clone(), lane_enforcement).await {
             Ok(caller) => Some(Arc::new(caller)),
             Err(err) => {
