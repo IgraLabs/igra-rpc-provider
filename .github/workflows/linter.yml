@@ -38,16 +38,30 @@ jobs:
           echo "SCCACHE_DIR=${CI_CACHE}/sccache" >> $GITHUB_ENV
           mkdir -p "${CI_CACHE}/cargo-target" "${CI_CACHE}/cargo-home" "${CI_CACHE}/rustup" "${CI_CACHE}/sccache"
           echo "${CI_CACHE}/cargo-home/bin" >> $GITHUB_PATH
+      # Installs rustup and a stable toolchain. The lint steps below deliberately do not
+      # use it — see the note there.
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: mozilla-actions/sccache-action@v0.0.9
 
+      # No `+stable` on the lint steps: these run under the toolchain pinned in
+      # rust-toolchain.toml, which rustup installs on first use along with its rustfmt and
+      # clippy components.
+      #
+      # Linting with `+stable` meant a lint gate that could fail without a code change —
+      # every Rust release could turn CI red — and a clean local `cargo clippy` no longer
+      # predicted CI, because contributors run the pinned toolchain. Building and testing
+      # against newer stable is useful coverage, so build-and-test.yml keeps `+stable`;
+      # linting needs to be reproducible. Build broadly, lint deterministically.
+      #
+      # Picking up new lints is now a deliberate bump of rust-toolchain.toml, in a PR that
+      # can fix what the bump surfaces.
       - name: Check formatting
-        run: cargo +stable fmt -- --check
+        run: cargo fmt -- --check
 
       - name: Run clippy
-        run: cargo +stable clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Install typos
         run: |
