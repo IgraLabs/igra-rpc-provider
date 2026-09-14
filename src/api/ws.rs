@@ -11,12 +11,13 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use futures_util::{future::join_all, SinkExt, StreamExt};
+use futures_util::{stream, SinkExt, StreamExt};
 use serde_json::Value;
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, OwnedSemaphorePermit};
 use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite;
 use tracing::{error, info, warn};
@@ -263,8 +264,7 @@ async fn handle_ws_connection(
                     continue;
                 }
 
-                // Acquire permits proportional to batch size so the semaphore
-                // accurately reflects the number of concurrent HTTP round-trips.
+                // Reserve capacity for the concurrent request items in this batch.
                 #[allow(clippy::cast_possible_truncation)] // MAX_INFLIGHT_REQUESTS (64) fits in u32
                 let batch_len = requests.len().min(MAX_INFLIGHT_REQUESTS) as u32;
                 let permit = match inflight_semaphore.clone().try_acquire_many_owned(batch_len) {
@@ -284,13 +284,10 @@ async fn handle_ws_connection(
                 let state = Arc::clone(&state);
                 let client_tx = client_tx.clone();
                 in_flight.spawn(async move {
-                    let futs: Vec<_> = requests
+                    let futs = requests
                         .into_iter()
-                        .map(|req| process_ws_request_value(&state, req))
-                        .collect();
-                    let responses = join_all(futs).await;
-                    let _ = send_value(&client_tx, &Value::Array(responses)).await;
-                    drop(permit); // held until all batch items complete
+                        .map(|req| process_ws_request_value(&state, req));
+                    process_ws_batch(futs, client_tx, permit).await;
                 });
             }
         }
@@ -308,6 +305,24 @@ async fn handle_ws_connection(
         warn!(conn_id, "Writer task did not shut down within timeout");
     }
     info!(conn_id, "WebSocket connection closed");
+}
+
+/// Collect batch responses in request order and retain capacity through the send.
+async fn process_ws_batch<F>(
+    futures: impl IntoIterator<Item = F>,
+    client_tx: mpsc::Sender<String>,
+    permit: OwnedSemaphorePermit,
+) where
+    F: Future<Output = Value>,
+{
+    // The caller rejects empty batches before reserving capacity.
+    assert!(permit.num_permits() > 0, "batch requires reserved capacity");
+    let responses = stream::iter(futures)
+        .buffered(permit.num_permits())
+        .collect::<Vec<_>>()
+        .await;
+    let _ = send_value(&client_tx, &Value::Array(responses)).await;
+    drop(permit);
 }
 
 /// Send a JSON-RPC error and close frame to the client when the connection cannot be established.
@@ -394,4 +409,205 @@ async fn forward_to_reth(reth_write: &mut RethWsWriter, req: &RpcRequest) -> boo
 /// Check if the method is a WebSocket subscription method.
 fn is_subscription_method(method: &str) -> bool {
     matches!(method, "eth_subscribe" | "eth_unsubscribe")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::poll;
+    use serde_json::json;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::sync::{oneshot, Semaphore};
+
+    const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+    #[derive(Default)]
+    struct Activity {
+        active: AtomicUsize,
+        peak: AtomicUsize,
+        started: AtomicUsize,
+    }
+
+    struct ActiveRequest(Arc<Activity>);
+
+    impl Drop for ActiveRequest {
+        fn drop(&mut self) {
+            self.0.active.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    fn response(id: usize) -> Value {
+        if id.is_multiple_of(2) {
+            json!({"jsonrpc": "2.0", "id": id, "result": id})
+        } else {
+            routing::json_rpc_error(json!(id), -32600, "test error")
+        }
+    }
+
+    fn gated_responses(
+        count: usize,
+        activity: Arc<Activity>,
+    ) -> (
+        Vec<oneshot::Sender<()>>,
+        impl Iterator<Item = impl Future<Output = Value>>,
+    ) {
+        let (gates, futures): (Vec<_>, Vec<_>) = (0..count)
+            .map(|id| {
+                let (gate, ready) = oneshot::channel();
+                let activity = Arc::clone(&activity);
+                let future = async move {
+                    let active = activity
+                        .active
+                        .fetch_add(1, Ordering::SeqCst)
+                        .checked_add(1)
+                        .expect("test active count fits in usize");
+                    activity.peak.fetch_max(active, Ordering::SeqCst);
+                    activity.started.fetch_add(1, Ordering::SeqCst);
+                    let _active = ActiveRequest(activity);
+                    ready.await.expect("gate released");
+                    response(id)
+                };
+                (gate, future)
+            })
+            .unzip();
+        (gates, futures.into_iter())
+    }
+
+    #[tokio::test]
+    async fn batch_respects_reserved_capacity() {
+        // The smaller reservation also detects accidentally hard-coding 64 in the helper.
+        for (count, reserved) in [(1, 1), (63, 63), (64, 64), (65, 64), (129, 64), (65, 7)] {
+            let semaphore = Arc::new(Semaphore::new(MAX_INFLIGHT_REQUESTS));
+            let permit = Arc::clone(&semaphore)
+                .try_acquire_many_owned(u32::try_from(reserved).expect("test capacity fits in u32"))
+                .expect("capacity available");
+            let activity = Arc::new(Activity::default());
+            let (gates, futures) = gated_responses(count, Arc::clone(&activity));
+            let (client_tx, mut client_rx) = mpsc::channel(1);
+            let mut batch = Box::pin(process_ws_batch(futures, client_tx, permit));
+
+            // Poll until every runnable item is waiting on its persistent gate.
+            assert!(poll!(batch.as_mut()).is_pending());
+            assert_eq!(
+                activity.active.load(Ordering::SeqCst),
+                reserved,
+                "batch of {count} exceeded its reservation"
+            );
+            for gate in gates {
+                gate.send(()).expect("request still waiting");
+            }
+            tokio::time::timeout(TEST_TIMEOUT, batch)
+                .await
+                .expect("batch completes");
+
+            assert!(activity.peak.load(Ordering::SeqCst) <= reserved);
+            assert_eq!(activity.started.load(Ordering::SeqCst), count);
+            assert_eq!(activity.active.load(Ordering::SeqCst), 0);
+            assert_eq!(semaphore.available_permits(), MAX_INFLIGHT_REQUESTS);
+            let actual: Value =
+                serde_json::from_str(&client_rx.try_recv().expect("one batch response"))
+                    .expect("valid JSON");
+            assert_eq!(actual, Value::Array((0..count).map(response).collect()));
+            assert!(client_rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_preserves_order_when_later_item_finishes_first() {
+        let semaphore = Arc::new(Semaphore::new(2));
+        let permit = semaphore
+            .try_acquire_many_owned(2)
+            .expect("capacity available");
+        let activity = Arc::new(Activity::default());
+        let (mut gates, futures) = gated_responses(2, Arc::clone(&activity));
+        let (client_tx, mut client_rx) = mpsc::channel(1);
+        let mut batch = Box::pin(process_ws_batch(futures, client_tx, permit));
+        assert!(poll!(batch.as_mut()).is_pending());
+        assert_eq!(activity.active.load(Ordering::SeqCst), 2);
+
+        gates.pop().expect("second gate").send(()).expect("waiting");
+        assert!(poll!(batch.as_mut()).is_pending());
+        assert_eq!(activity.active.load(Ordering::SeqCst), 1);
+        assert!(client_rx.try_recv().is_err());
+        gates.pop().expect("first gate").send(()).expect("waiting");
+        tokio::time::timeout(TEST_TIMEOUT, batch)
+            .await
+            .expect("batch completes");
+        let actual: Value = serde_json::from_str(&client_rx.try_recv().expect("batch response"))
+            .expect("valid JSON");
+        assert_eq!(actual, json!([response(0), response(1)]));
+        assert!(client_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn batch_cancellation_drops_active_items_and_releases_capacity() {
+        let semaphore = Arc::new(Semaphore::new(MAX_INFLIGHT_REQUESTS));
+        let permit = Arc::clone(&semaphore)
+            .try_acquire_many_owned(64)
+            .expect("capacity available");
+        let activity = Arc::new(Activity::default());
+        let (gates, futures) = gated_responses(129, Arc::clone(&activity));
+        let (client_tx, mut client_rx) = mpsc::channel(1);
+        let mut batch = Box::pin(process_ws_batch(futures, client_tx, permit));
+        assert!(poll!(batch.as_mut()).is_pending());
+        assert_eq!(activity.active.load(Ordering::SeqCst), 64);
+        assert_eq!(semaphore.available_permits(), 0);
+
+        let mut in_flight = JoinSet::new();
+        in_flight.spawn(batch);
+        in_flight.abort_all();
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            while let Some(result) = in_flight.join_next().await {
+                assert!(result.expect_err("batch aborted").is_cancelled());
+            }
+        })
+        .await
+        .expect("aborted tasks drained");
+
+        assert_eq!(activity.active.load(Ordering::SeqCst), 0);
+        assert_eq!(activity.started.load(Ordering::SeqCst), 64);
+        assert!(gates.iter().all(oneshot::Sender::is_closed));
+        assert_eq!(semaphore.available_permits(), MAX_INFLIGHT_REQUESTS);
+        assert!(client_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn batch_holds_capacity_until_blocked_send_finishes_or_channel_closes() {
+        for close_channel in [false, true] {
+            let semaphore = Arc::new(Semaphore::new(1));
+            let permit = Arc::clone(&semaphore)
+                .try_acquire_owned()
+                .expect("capacity available");
+            let (client_tx, mut client_rx) = mpsc::channel(1);
+            client_tx
+                .try_send("occupied".into())
+                .expect("channel empty");
+            let mut batch = Box::pin(process_ws_batch(
+                [std::future::ready(response(0))],
+                client_tx,
+                permit,
+            ));
+            assert!(poll!(batch.as_mut()).is_pending());
+            assert_eq!(semaphore.available_permits(), 0);
+
+            if close_channel {
+                client_rx.close();
+            } else {
+                assert_eq!(client_rx.try_recv().expect("queued message"), "occupied");
+            }
+            tokio::time::timeout(TEST_TIMEOUT, batch)
+                .await
+                .expect("send completes or fails");
+            assert_eq!(semaphore.available_permits(), 1);
+            if close_channel {
+                assert_eq!(client_rx.try_recv().expect("queued message"), "occupied");
+            } else {
+                let actual: Value =
+                    serde_json::from_str(&client_rx.try_recv().expect("batch response"))
+                        .expect("valid JSON");
+                assert_eq!(actual, json!([response(0)]));
+            }
+            assert!(client_rx.try_recv().is_err());
+        }
+    }
 }
