@@ -67,7 +67,7 @@ jobs:
         run: |
           export PATH="$CARGO_HOME/bin:$PATH"
           if ! command -v typos &> /dev/null; then
-            RUSTC_WRAPPER= cargo install typos-cli --locked
+            RUSTC_WRAPPER= cargo install typos-cli --version 1.49.0 --locked
           fi
 
       - name: Run typos
