@@ -455,11 +455,15 @@ fn is_subscription_method(method: &str) -> bool {
 /// `v3.1.0` (all six resolve that path to the same blob). Whether each tag was deployed is not
 /// recorded here.
 ///
-/// `batch_respects_reserved_capacity`, `batch_cancellation_drops_active_items_and_releases_capacity`
-/// and `batch_refills_window_when_a_completed_item_cannot_yet_be_yielded` are the reproducers: all
-/// three fail against that revision's `join_all` collector, which polled every request in a batch
-/// regardless of how many permits were reserved. The response-ordering and permit-lifetime tests
-/// guard contracts that `join_all` also satisfied, and pass either way.
+/// `batch_respects_reserved_capacity`, `batch_cancellation_drops_active_items_and_releases_capacity`,
+/// `batch_refills_window_when_a_completed_item_cannot_yet_be_yielded` and
+/// `end_to_end::oversized_batch_over_a_real_socket_stays_within_the_connection_limit` are the
+/// reproducers: all four fail against that revision's `join_all` collector, which polled every
+/// request in a batch regardless of how many permits were reserved. The last of those is the only
+/// one that exercises the reservation the caller actually makes, rather than a permit handed
+/// straight to the helper; under `join_all` it reports all 129 requests reaching the upstream at
+/// once. The response-ordering, permit-lifetime and item-panic tests guard contracts that
+/// `join_all` also satisfied, and pass either way.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -698,6 +702,320 @@ mod tests {
                 assert_eq!(actual, json!([response(0)]));
             }
             assert!(client_rx.try_recv().is_err());
+        }
+    }
+
+    /// A panicking batch item must release the whole reservation and be reported to the caller.
+    ///
+    /// The committed tests cover JSON-RPC error values and a failed send; both return normally, so
+    /// the permit is dropped on the ordinary path. A panic unwinds instead, and the permit is only
+    /// released because `OwnedSemaphorePermit::drop` runs during that unwind. `Cargo.toml` declares
+    /// no `panic = "abort"`, so release builds unwind here too.
+    #[tokio::test]
+    async fn batch_item_panic_releases_capacity_and_is_reported() {
+        const RESERVED: u32 = 4;
+        let semaphore = Arc::new(Semaphore::new(MAX_INFLIGHT_REQUESTS));
+        let permit = Arc::clone(&semaphore)
+            .try_acquire_many_owned(RESERVED)
+            .expect("capacity available");
+        let (client_tx, mut client_rx) = mpsc::channel(1);
+
+        let futures = (0..RESERVED as usize).map(|id| async move {
+            assert!(id != 2, "batch item {id} panics on purpose");
+            response(id)
+        });
+
+        let mut tasks = JoinSet::new();
+        tasks.spawn(process_ws_batch(futures, client_tx, permit));
+
+        let joined = tokio::time::timeout(TEST_TIMEOUT, tasks.join_next())
+            .await
+            .expect("batch task settles")
+            .expect("task was spawned");
+        let error = joined.expect_err("the panicking item aborts the batch");
+        assert!(error.is_panic(), "caller sees a panic, not a cancellation");
+
+        // The connection reuses this semaphore for every later request, so an unreleased permit
+        // would permanently shrink its capacity rather than fail visibly.
+        assert_eq!(semaphore.available_permits(), MAX_INFLIGHT_REQUESTS);
+        assert!(
+            client_rx.try_recv().is_err(),
+            "a partial batch response must not reach the client"
+        );
+    }
+
+    /// End-to-end coverage for the reservation itself, over a real socket.
+    ///
+    /// The helper tests above prove `process_ws_batch` honours whatever permit it is handed. They
+    /// cannot prove the caller reserves the right number, nor that the permit comes from the
+    /// connection's own semaphore — both were argued from the source in review, not tested. This
+    /// module drives an oversized batch through `handle_ws_upgrade` over TCP and counts concurrency
+    /// where it actually matters: at the upstream.
+    mod end_to_end {
+        use super::*;
+        use crate::config::{
+            AppConfig, GasConfig, LaneConfig, MiningConfig, ProxyConfig, RetryConfig,
+            SecurityConfig, ServerConfig, WalletConfig,
+        };
+        use crate::services::transaction::TransactionRequest;
+        use crate::services::{gas_price::GasPriceService, proxy::ProxyService};
+        use axum::{routing::get, Router};
+        use std::net::SocketAddr;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::sync::watch;
+        use tokio_tungstenite::tungstenite::Message as ClientMessage;
+
+        /// Comfortably over `MAX_INFLIGHT_REQUESTS`, so the window must refill to finish.
+        const BATCH: usize = 129;
+
+        /// How long the window is observed after it fills. Long enough that a caller admitting the
+        /// rest of the batch would have done so, short enough not to dominate the suite.
+        const SETTLE: Duration = Duration::from_millis(250);
+
+        /// Minimal HTTP upstream that records peak concurrency and holds every request open until
+        /// the test releases it.
+        ///
+        /// Holding is what makes the bound observable. If responses returned immediately, requests
+        /// would retire as fast as they were admitted and a peak of 64 would prove nothing about
+        /// the limit. `watch` rather than `Notify` because later rounds of the batch arrive *after*
+        /// the release fires, and must not park forever waiting for a notification already sent.
+        async fn spawn_counting_upstream(
+            activity: Arc<Activity>,
+            release: watch::Sender<bool>,
+        ) -> SocketAddr {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind counting upstream");
+            let addr = listener.local_addr().expect("counting upstream addr");
+            tokio::spawn(async move {
+                while let Ok((mut socket, _)) = listener.accept().await {
+                    let activity = Arc::clone(&activity);
+                    let mut released = release.subscribe();
+                    tokio::spawn(async move {
+                        let Some(body) = read_http_body(&mut socket).await else {
+                            return;
+                        };
+
+                        let active = activity
+                            .active
+                            .fetch_add(1, Ordering::SeqCst)
+                            .checked_add(1)
+                            .expect("upstream active count fits in usize");
+                        activity.peak.fetch_max(active, Ordering::SeqCst);
+                        activity.started.fetch_add(1, Ordering::SeqCst);
+                        let _ = released.wait_for(|released| *released).await;
+                        activity.active.fetch_sub(1, Ordering::SeqCst);
+
+                        // Echo the request id so the client can verify response order.
+                        let id = serde_json::from_slice::<Value>(&body)
+                            .ok()
+                            .and_then(|value| value.get("id").cloned())
+                            .unwrap_or(Value::Null);
+                        let payload = json!({"jsonrpc": "2.0", "id": id, "result": id}).to_string();
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                             Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                            payload.len()
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                        let _ = socket.flush().await;
+                    });
+                }
+            });
+            addr
+        }
+
+        /// Read one HTTP request and return its body, or `None` if the peer hangs up first.
+        async fn read_http_body(socket: &mut tokio::net::TcpStream) -> Option<Vec<u8>> {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let read = socket.read(&mut chunk).await.ok()?;
+                if read == 0 {
+                    return None;
+                }
+                buf.extend_from_slice(&chunk[..read]);
+                let Some(head_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&buf[..head_end]).to_lowercase();
+                let length: usize = head
+                    .split("content-length:")
+                    .nth(1)
+                    .and_then(|rest| rest.split('\r').next())
+                    .and_then(|value| value.trim().parse().ok())
+                    .unwrap_or(0);
+                let body_start = head_end.checked_add(4)?;
+                let body_end = body_start.checked_add(length)?;
+                if buf.len() >= body_end {
+                    return Some(buf[body_start..body_end].to_vec());
+                }
+            }
+        }
+
+        /// `handle_ws_connection` dials the upstream WebSocket before serving anything, so one has
+        /// to exist for the connection to open at all. It carries no traffic here — this test
+        /// drives batches, not subscriptions.
+        async fn spawn_idle_ws_upstream() -> SocketAddr {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind ws upstream");
+            let addr = listener.local_addr().expect("ws upstream addr");
+            tokio::spawn(async move {
+                while let Ok((socket, _)) = listener.accept().await {
+                    tokio::spawn(async move {
+                        if let Ok(mut upstream) = tokio_tungstenite::accept_async(socket).await {
+                            while let Some(Ok(_)) = upstream.next().await {}
+                        }
+                    });
+                }
+            });
+            addr
+        }
+
+        /// Serve the real router on an ephemeral port. The returned receiver keeps the transaction
+        /// channel open; read-only mode means this test never uses it.
+        async fn spawn_provider(
+            el_url: String,
+            el_ws_url: String,
+        ) -> (SocketAddr, mpsc::Receiver<TransactionRequest>) {
+            let gas = GasConfig::default();
+            let mut proxy = ProxyConfig::with_el_url(el_url.clone());
+            proxy.el_ws_url = el_ws_url;
+            let config = AppConfig {
+                server: ServerConfig {
+                    host: "127.0.0.1".to_string(),
+                    port: 0,
+                },
+                proxy,
+                wallet: WalletConfig {
+                    wallet_daemon_uri: String::new(),
+                    to_address: String::new(),
+                },
+                security: SecurityConfig {
+                    enable_whitelist: false,
+                    read_only: true,
+                },
+                mining: MiningConfig::default(),
+                lane: LaneConfig::disabled(),
+                gas: gas.clone(),
+                retry: RetryConfig::default(),
+            };
+            let gas_price_service = GasPriceService::new(gas);
+            let proxy_service = ProxyService::new(el_url, gas_price_service.clone());
+            let (transaction_sender, transaction_receiver) = mpsc::channel(1);
+            let state = Arc::new(AppState::new(
+                config,
+                transaction_sender,
+                None,
+                proxy_service,
+                gas_price_service,
+                Arc::new(tokio::sync::Semaphore::new(MAX_WS_CONNECTIONS)),
+            ));
+
+            let app = Router::new()
+                .route("/", get(handle_ws_upgrade))
+                .with_state(state);
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind provider");
+            let addr = listener.local_addr().expect("provider addr");
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, app).await;
+            });
+            (addr, transaction_receiver)
+        }
+
+        /// Wait until `probe` holds, polling rather than sleeping a fixed interval so the test is
+        /// not tuned to machine speed.
+        async fn wait_until(probe: impl Fn() -> bool) -> bool {
+            tokio::time::timeout(TEST_TIMEOUT, async {
+                while !probe() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .is_ok()
+        }
+
+        #[tokio::test]
+        async fn oversized_batch_over_a_real_socket_stays_within_the_connection_limit() {
+            let activity = Arc::new(Activity::default());
+            let (release, _keep_alive) = watch::channel(false);
+            let upstream = spawn_counting_upstream(Arc::clone(&activity), release.clone()).await;
+            let ws_upstream = spawn_idle_ws_upstream().await;
+            let (provider, _transaction_receiver) =
+                spawn_provider(format!("http://{upstream}"), format!("ws://{ws_upstream}")).await;
+
+            let (mut client, _response) =
+                tokio_tungstenite::connect_async(format!("ws://{provider}/"))
+                    .await
+                    .expect("client connects to provider");
+
+            let batch: Vec<Value> = (0..BATCH)
+                .map(|id| json!({"jsonrpc": "2.0", "id": id, "method": "eth_blockNumber"}))
+                .collect();
+            client
+                .send(ClientMessage::Text(Value::Array(batch).to_string()))
+                .await
+                .expect("client sends the batch");
+
+            // The window must fill to the reservation, or the batch never got that far and
+            // everything below would pass for the wrong reason.
+            assert!(
+                wait_until(|| activity.started.load(Ordering::SeqCst) >= MAX_INFLIGHT_REQUESTS)
+                    .await,
+                "the connection admits its full reservation"
+            );
+
+            // A single reading cannot tell "stopped at the limit" from "not there yet", so let the
+            // runtime keep making progress with all 64 still held and confirm nothing more is
+            // admitted. `started` catches a 65th request, `peak` also catches an overshoot that
+            // has already drained.
+            tokio::time::sleep(SETTLE).await;
+            assert_eq!(
+                activity.started.load(Ordering::SeqCst),
+                MAX_INFLIGHT_REQUESTS,
+                "no request beyond the reservation is admitted while the window is full"
+            );
+            assert_eq!(
+                activity.active.load(Ordering::SeqCst),
+                MAX_INFLIGHT_REQUESTS,
+                "the whole reservation stays in flight rather than draining early"
+            );
+            assert_eq!(
+                activity.peak.load(Ordering::SeqCst),
+                MAX_INFLIGHT_REQUESTS,
+                "concurrency never overshoots the reservation, even transiently"
+            );
+
+            release.send(true).expect("release the upstream");
+
+            let response = tokio::time::timeout(TEST_TIMEOUT, client.next())
+                .await
+                .expect("batch response arrives")
+                .expect("stream is open")
+                .expect("response frame");
+            let ClientMessage::Text(text) = response else {
+                panic!("expected a text frame, got {response:?}");
+            };
+            let responses: Vec<Value> =
+                serde_json::from_str(&text).expect("batch response is a JSON array");
+
+            assert_eq!(responses.len(), BATCH, "every request is answered");
+            for (index, entry) in responses.iter().enumerate() {
+                assert_eq!(
+                    entry.get("id"),
+                    Some(&json!(index)),
+                    "responses come back in request order"
+                );
+            }
+            assert_eq!(
+                activity.started.load(Ordering::SeqCst),
+                BATCH,
+                "every request reaches the upstream exactly once"
+            );
         }
     }
 }
