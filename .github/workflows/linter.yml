@@ -63,11 +63,18 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # Pinned: typos 1.50+ requires Rust 1.95, newer than rust-toolchain.toml's 1.91.
+      # Bump this together with rust-toolchain.toml.
+      #
+      # The guard compares versions rather than just testing for the binary: these runners
+      # are self-hosted with a persistent CARGO_HOME, so `command -v typos` alone would keep
+      # whatever version a runner already had and the pin would only bind on a cold runner.
       - name: Install typos
         run: |
           export PATH="$CARGO_HOME/bin:$PATH"
-          if ! command -v typos &> /dev/null; then
-            RUSTC_WRAPPER= cargo install typos-cli --version 1.49.0 --locked
+          TYPOS_VERSION=1.49.0
+          if ! typos --version 2>/dev/null | grep -qw "$TYPOS_VERSION"; then
+            RUSTC_WRAPPER= cargo install typos-cli --version "$TYPOS_VERSION" --locked --force
           fi
 
       - name: Run typos

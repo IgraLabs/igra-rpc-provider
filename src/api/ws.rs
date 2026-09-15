@@ -11,7 +11,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use futures_util::{stream, SinkExt, StreamExt};
+use futures_util::{stream::FuturesUnordered, SinkExt, StreamExt};
 use serde_json::Value;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -307,7 +307,29 @@ async fn handle_ws_connection(
     info!(conn_id, "WebSocket connection closed");
 }
 
+/// Tag a batch response with its request index so it can be placed back in request order.
+///
+/// Driving these futures through `stream::iter(..).buffer_unordered(n)` does not compile:
+/// the batch futures borrow `AppState`, and any index-tagging `map` closure over that borrow
+/// is rejected with `implementation of FnOnce is not general enough`. That is why
+/// `process_ws_batch` primes and refills a `FuturesUnordered` by hand instead. Inside that
+/// loop an inline closure does compile; this named function is kept for readability.
+async fn indexed_response<F>(index: usize, request: F) -> (usize, Value)
+where
+    F: Future<Output = Value>,
+{
+    (index, request.await)
+}
+
 /// Collect batch responses in request order and retain capacity through the send.
+///
+/// Runs at most `permit.num_permits()` requests at once, priming that many and admitting
+/// one more on each completion. Refilling on completion rather than on delivery is
+/// deliberate: an ordered buffer counts a finished-but-not-yet-yielded response against the
+/// window, so one slow request at the head of a batch larger than the reservation would
+/// starve the rest down to a single in-flight request while every permit stayed held.
+/// Responses therefore arrive out of order and are sorted back into request order before
+/// the array is sent.
 async fn process_ws_batch<F>(
     futures: impl IntoIterator<Item = F>,
     client_tx: mpsc::Sender<String>,
@@ -317,10 +339,25 @@ async fn process_ws_batch<F>(
 {
     // The caller rejects empty batches before reserving capacity.
     assert!(permit.num_permits() > 0, "batch requires reserved capacity");
-    let responses = stream::iter(futures)
-        .buffered(permit.num_permits())
-        .collect::<Vec<_>>()
-        .await;
+    let mut requests = futures.into_iter().enumerate();
+    let mut running = FuturesUnordered::new();
+    for (index, request) in requests.by_ref().take(permit.num_permits()) {
+        running.push(indexed_response(index, request));
+    }
+
+    // Admit one more request per completion so the window stays full.
+    let mut responses = Vec::new();
+    while let Some(response) = running.next().await {
+        responses.push(response);
+        if let Some((next_index, next_request)) = requests.next() {
+            running.push(indexed_response(next_index, next_request));
+        }
+    }
+
+    // Sorting rather than placing by index keeps the array exactly as long as the
+    // responses actually received, with no placeholder that could reach a client.
+    responses.sort_unstable_by_key(|(index, _)| *index);
+    let responses: Vec<Value> = responses.into_iter().map(|(_, value)| value).collect();
     let _ = send_value(&client_tx, &Value::Array(responses)).await;
     drop(permit);
 }
@@ -411,6 +448,18 @@ fn is_subscription_method(method: &str) -> bool {
     matches!(method, "eth_subscribe" | "eth_unsubscribe")
 }
 
+/// Batch concurrency regression tests.
+///
+/// Affected revision: the unbounded collector was introduced in `ec10085`, was present through
+/// `c840c0d` (`src/api/ws.rs` blob `8cb88ed`), and shipped in every tag from `v2.3.0` through
+/// `v3.1.0` (all six resolve that path to the same blob). Whether each tag was deployed is not
+/// recorded here.
+///
+/// `batch_respects_reserved_capacity`, `batch_cancellation_drops_active_items_and_releases_capacity`
+/// and `batch_refills_window_when_a_completed_item_cannot_yet_be_yielded` are the reproducers: all
+/// three fail against that revision's `join_all` collector, which polled every request in a batch
+/// regardless of how many permits were reserved. The response-ordering and permit-lifetime tests
+/// guard contracts that `join_all` also satisfied, and pass either way.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,6 +585,47 @@ mod tests {
         let actual: Value = serde_json::from_str(&client_rx.try_recv().expect("batch response"))
             .expect("valid JSON");
         assert_eq!(actual, json!([response(0), response(1)]));
+        assert!(client_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn batch_refills_window_when_a_completed_item_cannot_yet_be_yielded() {
+        // Guards against an ordered buffer, whose queue counts a completed-but-unyielded
+        // result against the window: item 1 finishing while item 0 is still gated would
+        // hold its slot and pin `started` at 2 instead of admitting item 2.
+        let semaphore = Arc::new(Semaphore::new(2));
+        let permit = Arc::clone(&semaphore)
+            .try_acquire_many_owned(2)
+            .expect("capacity available");
+        let activity = Arc::new(Activity::default());
+        let (mut gates, futures) = gated_responses(4, Arc::clone(&activity));
+        let (client_tx, mut client_rx) = mpsc::channel(1);
+        let mut batch = Box::pin(process_ws_batch(futures, client_tx, permit));
+
+        assert!(poll!(batch.as_mut()).is_pending());
+        assert_eq!(activity.started.load(Ordering::SeqCst), 2);
+
+        // Release item 1 while item 0 is still gated; its slot must pass to item 2.
+        gates.remove(1).send(()).expect("item 1 still waiting");
+        assert!(poll!(batch.as_mut()).is_pending());
+        assert_eq!(activity.started.load(Ordering::SeqCst), 3);
+        assert_eq!(activity.active.load(Ordering::SeqCst), 2);
+        assert!(client_rx.try_recv().is_err());
+
+        for gate in gates {
+            gate.send(()).expect("request still waiting");
+        }
+        tokio::time::timeout(TEST_TIMEOUT, batch)
+            .await
+            .expect("batch completes");
+
+        assert!(activity.peak.load(Ordering::SeqCst) <= 2);
+        assert_eq!(activity.started.load(Ordering::SeqCst), 4);
+        assert_eq!(activity.active.load(Ordering::SeqCst), 0);
+        assert_eq!(semaphore.available_permits(), 2);
+        let actual: Value = serde_json::from_str(&client_rx.try_recv().expect("batch response"))
+            .expect("valid JSON");
+        assert_eq!(actual, Value::Array((0..4).map(response).collect()));
         assert!(client_rx.try_recv().is_err());
     }
 
