@@ -11,12 +11,13 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use futures_util::{future::join_all, SinkExt, StreamExt};
+use futures_util::{stream::FuturesUnordered, SinkExt, StreamExt};
 use serde_json::Value;
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, OwnedSemaphorePermit};
 use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite;
 use tracing::{error, info, warn};
@@ -263,8 +264,7 @@ async fn handle_ws_connection(
                     continue;
                 }
 
-                // Acquire permits proportional to batch size so the semaphore
-                // accurately reflects the number of concurrent HTTP round-trips.
+                // Reserve capacity for the concurrent request items in this batch.
                 #[allow(clippy::cast_possible_truncation)] // MAX_INFLIGHT_REQUESTS (64) fits in u32
                 let batch_len = requests.len().min(MAX_INFLIGHT_REQUESTS) as u32;
                 let permit = match inflight_semaphore.clone().try_acquire_many_owned(batch_len) {
@@ -284,13 +284,10 @@ async fn handle_ws_connection(
                 let state = Arc::clone(&state);
                 let client_tx = client_tx.clone();
                 in_flight.spawn(async move {
-                    let futs: Vec<_> = requests
+                    let futs = requests
                         .into_iter()
-                        .map(|req| process_ws_request_value(&state, req))
-                        .collect();
-                    let responses = join_all(futs).await;
-                    let _ = send_value(&client_tx, &Value::Array(responses)).await;
-                    drop(permit); // held until all batch items complete
+                        .map(|req| process_ws_request_value(&state, req));
+                    process_ws_batch(futs, client_tx, permit).await;
                 });
             }
         }
@@ -308,6 +305,61 @@ async fn handle_ws_connection(
         warn!(conn_id, "Writer task did not shut down within timeout");
     }
     info!(conn_id, "WebSocket connection closed");
+}
+
+/// Tag a batch response with its request index so it can be placed back in request order.
+///
+/// Driving these futures through `stream::iter(..).buffer_unordered(n)` does not compile:
+/// the batch futures borrow `AppState`, and any index-tagging `map` closure over that borrow
+/// is rejected with `implementation of FnOnce is not general enough`. That is why
+/// `process_ws_batch` primes and refills a `FuturesUnordered` by hand instead. Inside that
+/// loop an inline closure does compile; this named function is kept for readability.
+async fn indexed_response<F>(index: usize, request: F) -> (usize, Value)
+where
+    F: Future<Output = Value>,
+{
+    (index, request.await)
+}
+
+/// Collect batch responses in request order and retain capacity through the send.
+///
+/// Runs at most `permit.num_permits()` requests at once, priming that many and admitting
+/// one more on each completion. Refilling on completion rather than on delivery is
+/// deliberate: an ordered buffer counts a finished-but-not-yet-yielded response against the
+/// window, so one slow request at the head of a batch larger than the reservation would
+/// starve the rest down to a single in-flight request while every permit stayed held.
+/// Responses therefore arrive out of order and are sorted back into request order before
+/// the array is sent.
+async fn process_ws_batch<F>(
+    futures: impl IntoIterator<Item = F>,
+    client_tx: mpsc::Sender<String>,
+    permit: OwnedSemaphorePermit,
+) where
+    F: Future<Output = Value>,
+{
+    // The caller rejects empty batches before reserving capacity.
+    assert!(permit.num_permits() > 0, "batch requires reserved capacity");
+    let mut requests = futures.into_iter().enumerate();
+    let mut running = FuturesUnordered::new();
+    for (index, request) in requests.by_ref().take(permit.num_permits()) {
+        running.push(indexed_response(index, request));
+    }
+
+    // Admit one more request per completion so the window stays full.
+    let mut responses = Vec::new();
+    while let Some(response) = running.next().await {
+        responses.push(response);
+        if let Some((next_index, next_request)) = requests.next() {
+            running.push(indexed_response(next_index, next_request));
+        }
+    }
+
+    // Sorting rather than placing by index keeps the array exactly as long as the
+    // responses actually received, with no placeholder that could reach a client.
+    responses.sort_unstable_by_key(|(index, _)| *index);
+    let responses: Vec<Value> = responses.into_iter().map(|(_, value)| value).collect();
+    let _ = send_value(&client_tx, &Value::Array(responses)).await;
+    drop(permit);
 }
 
 /// Send a JSON-RPC error and close frame to the client when the connection cannot be established.
@@ -394,4 +446,576 @@ async fn forward_to_reth(reth_write: &mut RethWsWriter, req: &RpcRequest) -> boo
 /// Check if the method is a WebSocket subscription method.
 fn is_subscription_method(method: &str) -> bool {
     matches!(method, "eth_subscribe" | "eth_unsubscribe")
+}
+
+/// Batch concurrency regression tests.
+///
+/// Affected revision: the unbounded collector was introduced in `ec10085`, was present through
+/// `c840c0d` (`src/api/ws.rs` blob `8cb88ed`), and shipped in every tag from `v2.3.0` through
+/// `v3.1.0` (all six resolve that path to the same blob). Whether each tag was deployed is not
+/// recorded here.
+///
+/// `batch_respects_reserved_capacity`, `batch_cancellation_drops_active_items_and_releases_capacity`,
+/// `batch_refills_window_when_a_completed_item_cannot_yet_be_yielded` and
+/// `end_to_end::oversized_batch_over_a_real_socket_stays_within_the_connection_limit` are the
+/// reproducers: all four fail against that revision's `join_all` collector, which polled every
+/// request in a batch regardless of how many permits were reserved. The last of those is the only
+/// one that exercises the reservation the caller actually makes, rather than a permit handed
+/// straight to the helper; under `join_all` it reports all 129 requests reaching the upstream at
+/// once. The response-ordering, permit-lifetime and item-panic tests guard contracts that
+/// `join_all` also satisfied, and pass either way.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::poll;
+    use serde_json::json;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::sync::{oneshot, Semaphore};
+
+    const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+    #[derive(Default)]
+    struct Activity {
+        active: AtomicUsize,
+        peak: AtomicUsize,
+        started: AtomicUsize,
+    }
+
+    struct ActiveRequest(Arc<Activity>);
+
+    impl Drop for ActiveRequest {
+        fn drop(&mut self) {
+            self.0.active.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    fn response(id: usize) -> Value {
+        if id.is_multiple_of(2) {
+            json!({"jsonrpc": "2.0", "id": id, "result": id})
+        } else {
+            routing::json_rpc_error(json!(id), -32600, "test error")
+        }
+    }
+
+    fn gated_responses(
+        count: usize,
+        activity: Arc<Activity>,
+    ) -> (
+        Vec<oneshot::Sender<()>>,
+        impl Iterator<Item = impl Future<Output = Value>>,
+    ) {
+        let (gates, futures): (Vec<_>, Vec<_>) = (0..count)
+            .map(|id| {
+                let (gate, ready) = oneshot::channel();
+                let activity = Arc::clone(&activity);
+                let future = async move {
+                    let active = activity
+                        .active
+                        .fetch_add(1, Ordering::SeqCst)
+                        .checked_add(1)
+                        .expect("test active count fits in usize");
+                    activity.peak.fetch_max(active, Ordering::SeqCst);
+                    activity.started.fetch_add(1, Ordering::SeqCst);
+                    let _active = ActiveRequest(activity);
+                    ready.await.expect("gate released");
+                    response(id)
+                };
+                (gate, future)
+            })
+            .unzip();
+        (gates, futures.into_iter())
+    }
+
+    #[tokio::test]
+    async fn batch_respects_reserved_capacity() {
+        // The smaller reservation also detects accidentally hard-coding 64 in the helper.
+        for (count, reserved) in [(1, 1), (63, 63), (64, 64), (65, 64), (129, 64), (65, 7)] {
+            let semaphore = Arc::new(Semaphore::new(MAX_INFLIGHT_REQUESTS));
+            let permit = Arc::clone(&semaphore)
+                .try_acquire_many_owned(u32::try_from(reserved).expect("test capacity fits in u32"))
+                .expect("capacity available");
+            let activity = Arc::new(Activity::default());
+            let (gates, futures) = gated_responses(count, Arc::clone(&activity));
+            let (client_tx, mut client_rx) = mpsc::channel(1);
+            let mut batch = Box::pin(process_ws_batch(futures, client_tx, permit));
+
+            // Poll until every runnable item is waiting on its persistent gate.
+            assert!(poll!(batch.as_mut()).is_pending());
+            assert_eq!(
+                activity.active.load(Ordering::SeqCst),
+                reserved,
+                "batch of {count} exceeded its reservation"
+            );
+            for gate in gates {
+                gate.send(()).expect("request still waiting");
+            }
+            tokio::time::timeout(TEST_TIMEOUT, batch)
+                .await
+                .expect("batch completes");
+
+            assert!(activity.peak.load(Ordering::SeqCst) <= reserved);
+            assert_eq!(activity.started.load(Ordering::SeqCst), count);
+            assert_eq!(activity.active.load(Ordering::SeqCst), 0);
+            assert_eq!(semaphore.available_permits(), MAX_INFLIGHT_REQUESTS);
+            let actual: Value =
+                serde_json::from_str(&client_rx.try_recv().expect("one batch response"))
+                    .expect("valid JSON");
+            assert_eq!(actual, Value::Array((0..count).map(response).collect()));
+            assert!(client_rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_preserves_order_when_later_item_finishes_first() {
+        let semaphore = Arc::new(Semaphore::new(2));
+        let permit = semaphore
+            .try_acquire_many_owned(2)
+            .expect("capacity available");
+        let activity = Arc::new(Activity::default());
+        let (mut gates, futures) = gated_responses(2, Arc::clone(&activity));
+        let (client_tx, mut client_rx) = mpsc::channel(1);
+        let mut batch = Box::pin(process_ws_batch(futures, client_tx, permit));
+        assert!(poll!(batch.as_mut()).is_pending());
+        assert_eq!(activity.active.load(Ordering::SeqCst), 2);
+
+        gates.pop().expect("second gate").send(()).expect("waiting");
+        assert!(poll!(batch.as_mut()).is_pending());
+        assert_eq!(activity.active.load(Ordering::SeqCst), 1);
+        assert!(client_rx.try_recv().is_err());
+        gates.pop().expect("first gate").send(()).expect("waiting");
+        tokio::time::timeout(TEST_TIMEOUT, batch)
+            .await
+            .expect("batch completes");
+        let actual: Value = serde_json::from_str(&client_rx.try_recv().expect("batch response"))
+            .expect("valid JSON");
+        assert_eq!(actual, json!([response(0), response(1)]));
+        assert!(client_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn batch_refills_window_when_a_completed_item_cannot_yet_be_yielded() {
+        // Guards against an ordered buffer, whose queue counts a completed-but-unyielded
+        // result against the window: item 1 finishing while item 0 is still gated would
+        // hold its slot and pin `started` at 2 instead of admitting item 2.
+        let semaphore = Arc::new(Semaphore::new(2));
+        let permit = Arc::clone(&semaphore)
+            .try_acquire_many_owned(2)
+            .expect("capacity available");
+        let activity = Arc::new(Activity::default());
+        let (mut gates, futures) = gated_responses(4, Arc::clone(&activity));
+        let (client_tx, mut client_rx) = mpsc::channel(1);
+        let mut batch = Box::pin(process_ws_batch(futures, client_tx, permit));
+
+        assert!(poll!(batch.as_mut()).is_pending());
+        assert_eq!(activity.started.load(Ordering::SeqCst), 2);
+
+        // Release item 1 while item 0 is still gated; its slot must pass to item 2.
+        gates.remove(1).send(()).expect("item 1 still waiting");
+        assert!(poll!(batch.as_mut()).is_pending());
+        assert_eq!(activity.started.load(Ordering::SeqCst), 3);
+        assert_eq!(activity.active.load(Ordering::SeqCst), 2);
+        assert!(client_rx.try_recv().is_err());
+
+        for gate in gates {
+            gate.send(()).expect("request still waiting");
+        }
+        tokio::time::timeout(TEST_TIMEOUT, batch)
+            .await
+            .expect("batch completes");
+
+        assert!(activity.peak.load(Ordering::SeqCst) <= 2);
+        assert_eq!(activity.started.load(Ordering::SeqCst), 4);
+        assert_eq!(activity.active.load(Ordering::SeqCst), 0);
+        assert_eq!(semaphore.available_permits(), 2);
+        let actual: Value = serde_json::from_str(&client_rx.try_recv().expect("batch response"))
+            .expect("valid JSON");
+        assert_eq!(actual, Value::Array((0..4).map(response).collect()));
+        assert!(client_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn batch_cancellation_drops_active_items_and_releases_capacity() {
+        let semaphore = Arc::new(Semaphore::new(MAX_INFLIGHT_REQUESTS));
+        let permit = Arc::clone(&semaphore)
+            .try_acquire_many_owned(64)
+            .expect("capacity available");
+        let activity = Arc::new(Activity::default());
+        let (gates, futures) = gated_responses(129, Arc::clone(&activity));
+        let (client_tx, mut client_rx) = mpsc::channel(1);
+        let mut batch = Box::pin(process_ws_batch(futures, client_tx, permit));
+        assert!(poll!(batch.as_mut()).is_pending());
+        assert_eq!(activity.active.load(Ordering::SeqCst), 64);
+        assert_eq!(semaphore.available_permits(), 0);
+
+        let mut in_flight = JoinSet::new();
+        in_flight.spawn(batch);
+        in_flight.abort_all();
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            while let Some(result) = in_flight.join_next().await {
+                assert!(result.expect_err("batch aborted").is_cancelled());
+            }
+        })
+        .await
+        .expect("aborted tasks drained");
+
+        assert_eq!(activity.active.load(Ordering::SeqCst), 0);
+        assert_eq!(activity.started.load(Ordering::SeqCst), 64);
+        assert!(gates.iter().all(oneshot::Sender::is_closed));
+        assert_eq!(semaphore.available_permits(), MAX_INFLIGHT_REQUESTS);
+        assert!(client_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn batch_holds_capacity_until_blocked_send_finishes_or_channel_closes() {
+        for close_channel in [false, true] {
+            let semaphore = Arc::new(Semaphore::new(1));
+            let permit = Arc::clone(&semaphore)
+                .try_acquire_owned()
+                .expect("capacity available");
+            let (client_tx, mut client_rx) = mpsc::channel(1);
+            client_tx
+                .try_send("occupied".into())
+                .expect("channel empty");
+            let mut batch = Box::pin(process_ws_batch(
+                [std::future::ready(response(0))],
+                client_tx,
+                permit,
+            ));
+            assert!(poll!(batch.as_mut()).is_pending());
+            assert_eq!(semaphore.available_permits(), 0);
+
+            if close_channel {
+                client_rx.close();
+            } else {
+                assert_eq!(client_rx.try_recv().expect("queued message"), "occupied");
+            }
+            tokio::time::timeout(TEST_TIMEOUT, batch)
+                .await
+                .expect("send completes or fails");
+            assert_eq!(semaphore.available_permits(), 1);
+            if close_channel {
+                assert_eq!(client_rx.try_recv().expect("queued message"), "occupied");
+            } else {
+                let actual: Value =
+                    serde_json::from_str(&client_rx.try_recv().expect("batch response"))
+                        .expect("valid JSON");
+                assert_eq!(actual, json!([response(0)]));
+            }
+            assert!(client_rx.try_recv().is_err());
+        }
+    }
+
+    /// A panicking batch item must release the whole reservation and be reported to the caller.
+    ///
+    /// The committed tests cover JSON-RPC error values and a failed send; both return normally, so
+    /// the permit is dropped on the ordinary path. A panic unwinds instead, and the permit is only
+    /// released because `OwnedSemaphorePermit::drop` runs during that unwind. `Cargo.toml` declares
+    /// no `panic = "abort"`, so release builds unwind here too.
+    #[tokio::test]
+    async fn batch_item_panic_releases_capacity_and_is_reported() {
+        const RESERVED: u32 = 4;
+        let semaphore = Arc::new(Semaphore::new(MAX_INFLIGHT_REQUESTS));
+        let permit = Arc::clone(&semaphore)
+            .try_acquire_many_owned(RESERVED)
+            .expect("capacity available");
+        let (client_tx, mut client_rx) = mpsc::channel(1);
+
+        let futures = (0..RESERVED as usize).map(|id| async move {
+            assert!(id != 2, "batch item {id} panics on purpose");
+            response(id)
+        });
+
+        let mut tasks = JoinSet::new();
+        tasks.spawn(process_ws_batch(futures, client_tx, permit));
+
+        let joined = tokio::time::timeout(TEST_TIMEOUT, tasks.join_next())
+            .await
+            .expect("batch task settles")
+            .expect("task was spawned");
+        let error = joined.expect_err("the panicking item aborts the batch");
+        assert!(error.is_panic(), "caller sees a panic, not a cancellation");
+
+        // The connection reuses this semaphore for every later request, so an unreleased permit
+        // would permanently shrink its capacity rather than fail visibly.
+        assert_eq!(semaphore.available_permits(), MAX_INFLIGHT_REQUESTS);
+        assert!(
+            client_rx.try_recv().is_err(),
+            "a partial batch response must not reach the client"
+        );
+    }
+
+    /// End-to-end coverage for the reservation itself, over a real socket.
+    ///
+    /// The helper tests above prove `process_ws_batch` honours whatever permit it is handed. They
+    /// cannot prove the caller reserves the right number, nor that the permit comes from the
+    /// connection's own semaphore — both were argued from the source in review, not tested. This
+    /// module drives an oversized batch through `handle_ws_upgrade` over TCP and counts concurrency
+    /// where it actually matters: at the upstream.
+    mod end_to_end {
+        use super::*;
+        use crate::config::{
+            AppConfig, GasConfig, LaneConfig, MiningConfig, ProxyConfig, RetryConfig,
+            SecurityConfig, ServerConfig, WalletConfig,
+        };
+        use crate::services::transaction::TransactionRequest;
+        use crate::services::{gas_price::GasPriceService, proxy::ProxyService};
+        use axum::{routing::get, Router};
+        use std::net::SocketAddr;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::sync::watch;
+        use tokio_tungstenite::tungstenite::Message as ClientMessage;
+
+        /// Comfortably over `MAX_INFLIGHT_REQUESTS`, so the window must refill to finish.
+        const BATCH: usize = 129;
+
+        /// How long the window is observed after it fills. Long enough that a caller admitting the
+        /// rest of the batch would have done so, short enough not to dominate the suite.
+        const SETTLE: Duration = Duration::from_millis(250);
+
+        /// Minimal HTTP upstream that records peak concurrency and holds every request open until
+        /// the test releases it.
+        ///
+        /// Holding is what makes the bound observable. If responses returned immediately, requests
+        /// would retire as fast as they were admitted and a peak of 64 would prove nothing about
+        /// the limit. `watch` rather than `Notify` because later rounds of the batch arrive *after*
+        /// the release fires, and must not park forever waiting for a notification already sent.
+        async fn spawn_counting_upstream(
+            activity: Arc<Activity>,
+            release: watch::Sender<bool>,
+        ) -> SocketAddr {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind counting upstream");
+            let addr = listener.local_addr().expect("counting upstream addr");
+            tokio::spawn(async move {
+                while let Ok((mut socket, _)) = listener.accept().await {
+                    let activity = Arc::clone(&activity);
+                    let mut released = release.subscribe();
+                    tokio::spawn(async move {
+                        let Some(body) = read_http_body(&mut socket).await else {
+                            return;
+                        };
+
+                        let active = activity
+                            .active
+                            .fetch_add(1, Ordering::SeqCst)
+                            .checked_add(1)
+                            .expect("upstream active count fits in usize");
+                        activity.peak.fetch_max(active, Ordering::SeqCst);
+                        activity.started.fetch_add(1, Ordering::SeqCst);
+                        let _ = released.wait_for(|released| *released).await;
+                        activity.active.fetch_sub(1, Ordering::SeqCst);
+
+                        // Echo the request id so the client can verify response order.
+                        let id = serde_json::from_slice::<Value>(&body)
+                            .ok()
+                            .and_then(|value| value.get("id").cloned())
+                            .unwrap_or(Value::Null);
+                        let payload = json!({"jsonrpc": "2.0", "id": id, "result": id}).to_string();
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                             Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                            payload.len()
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                        let _ = socket.flush().await;
+                    });
+                }
+            });
+            addr
+        }
+
+        /// Read one HTTP request and return its body, or `None` if the peer hangs up first.
+        async fn read_http_body(socket: &mut tokio::net::TcpStream) -> Option<Vec<u8>> {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let read = socket.read(&mut chunk).await.ok()?;
+                if read == 0 {
+                    return None;
+                }
+                buf.extend_from_slice(&chunk[..read]);
+                let Some(head_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&buf[..head_end]).to_lowercase();
+                let length: usize = head
+                    .split("content-length:")
+                    .nth(1)
+                    .and_then(|rest| rest.split('\r').next())
+                    .and_then(|value| value.trim().parse().ok())
+                    .unwrap_or(0);
+                let body_start = head_end.checked_add(4)?;
+                let body_end = body_start.checked_add(length)?;
+                if buf.len() >= body_end {
+                    return Some(buf[body_start..body_end].to_vec());
+                }
+            }
+        }
+
+        /// `handle_ws_connection` dials the upstream WebSocket before serving anything, so one has
+        /// to exist for the connection to open at all. It carries no traffic here — this test
+        /// drives batches, not subscriptions.
+        async fn spawn_idle_ws_upstream() -> SocketAddr {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind ws upstream");
+            let addr = listener.local_addr().expect("ws upstream addr");
+            tokio::spawn(async move {
+                while let Ok((socket, _)) = listener.accept().await {
+                    tokio::spawn(async move {
+                        if let Ok(mut upstream) = tokio_tungstenite::accept_async(socket).await {
+                            while let Some(Ok(_)) = upstream.next().await {}
+                        }
+                    });
+                }
+            });
+            addr
+        }
+
+        /// Serve the real router on an ephemeral port. The returned receiver keeps the transaction
+        /// channel open; read-only mode means this test never uses it.
+        async fn spawn_provider(
+            el_url: String,
+            el_ws_url: String,
+        ) -> (SocketAddr, mpsc::Receiver<TransactionRequest>) {
+            let gas = GasConfig::default();
+            let mut proxy = ProxyConfig::with_el_url(el_url.clone());
+            proxy.el_ws_url = el_ws_url;
+            let config = AppConfig {
+                server: ServerConfig {
+                    host: "127.0.0.1".to_string(),
+                    port: 0,
+                },
+                proxy,
+                wallet: WalletConfig {
+                    wallet_daemon_uri: String::new(),
+                    to_address: String::new(),
+                },
+                security: SecurityConfig {
+                    enable_whitelist: false,
+                    read_only: true,
+                },
+                mining: MiningConfig::default(),
+                lane: LaneConfig::disabled(),
+                gas: gas.clone(),
+                retry: RetryConfig::default(),
+            };
+            let gas_price_service = GasPriceService::new(gas);
+            let proxy_service = ProxyService::new(el_url, gas_price_service.clone());
+            let (transaction_sender, transaction_receiver) = mpsc::channel(1);
+            let state = Arc::new(AppState::new(
+                config,
+                transaction_sender,
+                None,
+                proxy_service,
+                gas_price_service,
+                Arc::new(tokio::sync::Semaphore::new(MAX_WS_CONNECTIONS)),
+            ));
+
+            let app = Router::new()
+                .route("/", get(handle_ws_upgrade))
+                .with_state(state);
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind provider");
+            let addr = listener.local_addr().expect("provider addr");
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, app).await;
+            });
+            (addr, transaction_receiver)
+        }
+
+        /// Wait until `probe` holds, polling rather than sleeping a fixed interval so the test is
+        /// not tuned to machine speed.
+        async fn wait_until(probe: impl Fn() -> bool) -> bool {
+            tokio::time::timeout(TEST_TIMEOUT, async {
+                while !probe() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .is_ok()
+        }
+
+        #[tokio::test]
+        async fn oversized_batch_over_a_real_socket_stays_within_the_connection_limit() {
+            let activity = Arc::new(Activity::default());
+            let (release, _keep_alive) = watch::channel(false);
+            let upstream = spawn_counting_upstream(Arc::clone(&activity), release.clone()).await;
+            let ws_upstream = spawn_idle_ws_upstream().await;
+            let (provider, _transaction_receiver) =
+                spawn_provider(format!("http://{upstream}"), format!("ws://{ws_upstream}")).await;
+
+            let (mut client, _response) =
+                tokio_tungstenite::connect_async(format!("ws://{provider}/"))
+                    .await
+                    .expect("client connects to provider");
+
+            let batch: Vec<Value> = (0..BATCH)
+                .map(|id| json!({"jsonrpc": "2.0", "id": id, "method": "eth_blockNumber"}))
+                .collect();
+            client
+                .send(ClientMessage::Text(Value::Array(batch).to_string()))
+                .await
+                .expect("client sends the batch");
+
+            // The window must fill to the reservation, or the batch never got that far and
+            // everything below would pass for the wrong reason.
+            assert!(
+                wait_until(|| activity.started.load(Ordering::SeqCst) >= MAX_INFLIGHT_REQUESTS)
+                    .await,
+                "the connection admits its full reservation"
+            );
+
+            // A single reading cannot tell "stopped at the limit" from "not there yet", so let the
+            // runtime keep making progress with all 64 still held and confirm nothing more is
+            // admitted. `started` catches a 65th request, `peak` also catches an overshoot that
+            // has already drained.
+            tokio::time::sleep(SETTLE).await;
+            assert_eq!(
+                activity.started.load(Ordering::SeqCst),
+                MAX_INFLIGHT_REQUESTS,
+                "no request beyond the reservation is admitted while the window is full"
+            );
+            assert_eq!(
+                activity.active.load(Ordering::SeqCst),
+                MAX_INFLIGHT_REQUESTS,
+                "the whole reservation stays in flight rather than draining early"
+            );
+            assert_eq!(
+                activity.peak.load(Ordering::SeqCst),
+                MAX_INFLIGHT_REQUESTS,
+                "concurrency never overshoots the reservation, even transiently"
+            );
+
+            release.send(true).expect("release the upstream");
+
+            let response = tokio::time::timeout(TEST_TIMEOUT, client.next())
+                .await
+                .expect("batch response arrives")
+                .expect("stream is open")
+                .expect("response frame");
+            let ClientMessage::Text(text) = response else {
+                panic!("expected a text frame, got {response:?}");
+            };
+            let responses: Vec<Value> =
+                serde_json::from_str(&text).expect("batch response is a JSON array");
+
+            assert_eq!(responses.len(), BATCH, "every request is answered");
+            for (index, entry) in responses.iter().enumerate() {
+                assert_eq!(
+                    entry.get("id"),
+                    Some(&json!(index)),
+                    "responses come back in request order"
+                );
+            }
+            assert_eq!(
+                activity.started.load(Ordering::SeqCst),
+                BATCH,
+                "every request reaches the upstream exactly once"
+            );
+        }
+    }
 }
